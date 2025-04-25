@@ -35,13 +35,13 @@
 ```bash
 git clone https://github.com/optimus-a1/prior-auto-bot.git
 cd prior-auto-bot
-chmod +x prior_auto_bot.sh
+chmod +x prior.sh
 ```
 
 ### 2. 安装依赖（首次使用建议先执行）
 
 ```bash
-./prior_auto_bot.sh
+./prior.sh
 选择菜单项：1（检查并安装依赖）
 ```
 
