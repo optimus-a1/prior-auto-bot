@@ -355,44 +355,54 @@ batch_faucet() {
 approve_prior() {
     local pk="$1"
     local addr=$(cast wallet address --private-key "$pk")
-    
+
+    # 校验地址有效性
     if [[ -z "$addr" || ! "$addr" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
         log "${RED}无效钱包地址: $addr${NC}"
         return 1
     fi
 
+    # 检查是否加载了 RPC 和 SWAP_AMOUNT
+    if [[ -z "$BASE_SEPOLIA_RPC" || -z "$SWAP_AMOUNT" ]]; then
+        log "${RED}配置未加载，尝试读取 config.env...${NC}"
+        load_config
+    fi
+
+    # 检查 RPC 连通性
+    if ! cast block-number --rpc-url "$BASE_SEPOLIA_RPC" &>/dev/null; then
+        log "${RED}无法连接到 RPC：$BASE_SEPOLIA_RPC，请检查网络或 RPC 地址${NC}"
+        return 1
+    fi
+
+    # 检查 ETH 余额（用于 gas）
     local eth_bal_wei=$(cast balance "$addr" --rpc-url "$BASE_SEPOLIA_RPC" 2>/dev/null)
     local eth_bal=$(echo "scale=18; $eth_bal_wei / 10^18" | bc)
     if [[ $(echo "$eth_bal < 0.001" | bc) -eq 1 ]]; then
-        log "${RED}ETH 余额不足 for $addr: $eth_bal ETH（需要至少 0.001 ETH）${NC}"
+        log "${RED}ETH 余额不足 for $addr：$eth_bal ETH${NC}"
         return 1
     fi
 
-    if ! curl -s --head "$BASE_SEPOLIA_RPC" | grep "200" >/dev/null; then
-        log "${RED}无法连接到 Base Sepolia RPC ($BASE_SEPOLIA_RPC)，请检查网络或 RPC 地址${NC}"
+    # 获取 allowance
+    local allowance_raw=$(cast call "$PRIOR_TOKEN" "allowance(address,address)(uint256)" "$addr" "$SWAP_ROUTER" --rpc-url "$BASE_SEPOLIA_RPC" 2>/dev/null)
+    if [[ -z "$allowance_raw" ]]; then
+        log "${RED}获取授权额度失败，RPC 或合约异常${NC}"
         return 1
     fi
 
-    local allowance=$(cast call "$PRIOR_TOKEN" "allowance(address,address)(uint256)" "$addr" "$SWAP_ROUTER" --rpc-url "$BASE_SEPOLIA_RPC" 2>/dev/null | awk '{print $1}')
-    if [[ -z "$allowance" ]]; then
-        log "${RED}无法获取 $addr 的授权信息，请检查 RPC 或合约地址${NC}"
-        return 1
-    fi
+    local allowance=$(echo "$allowance_raw" | awk '{print $1}')
     local amount_wei=$(echo "$SWAP_AMOUNT * 10^18" | bc | cut -d. -f1)
 
+    # 判断是否已授权
     if [[ $(echo "$allowance >= $amount_wei" | bc) -eq 1 ]]; then
-        log "${GREEN}PRIOR 已授权 for $addr (Allowance: $allowance >= $amount_wei)${NC}"
+        log "${GREEN}PRIOR 已授权 for $addr（Allowance >= $SWAP_AMOUNT）${NC}"
         return 0
     fi
 
+    # 授权逻辑
     log "${CYAN}授权 PRIOR 代币给 Swap Router for $addr...${NC}"
     local approve_amount=$(cast to-wei 1000 ether)
     local data=$(cast calldata "approve(address,uint256)" "$SWAP_ROUTER" "$approve_amount")
-    local gas=$(cast gas-price --rpc-url "$BASE_SEPOLIA_RPC" 2>/dev/null)
-    if [[ -z "$gas" ]]; then
-        log "${RED}无法获取 gas 价格，请检查 RPC${NC}"
-        return 1
-    fi
+    local gas=$(cast gas-price --rpc-url "$BASE_SEPOLIA_RPC")
 
     attempt=1
     max_retries=2
@@ -400,6 +410,7 @@ approve_prior() {
         log "授权尝试 $attempt/$max_retries..."
         local tx_output=$(cast send --private-key "$pk" --rpc-url "$BASE_SEPOLIA_RPC" --gas-price "$gas" --gas-limit 100000 "$PRIOR_TOKEN" "$data" --json 2>/dev/null)
         local tx=$(echo "$tx_output" | jq -r '.transactionHash' 2>/dev/null)
+
         if [[ -n "$tx" && "$tx" != "null" ]]; then
             sleep 10
             local status=$(cast receipt "$tx" --rpc-url "$BASE_SEPOLIA_RPC" --json 2>/dev/null | jq -r '.status')
@@ -407,20 +418,18 @@ approve_prior() {
                 log "${GREEN}授权成功: $tx${NC}"
                 return 0
             else
-                log "${RED}授权失败: $tx (状态: $status)${NC}"
+                log "${RED}授权失败: $tx（状态: $status）${NC}"
             fi
         else
             log "${RED}授权交易发送失败: $tx_output${NC}"
         fi
-        if [[ $attempt -lt $max_retries ]]; then
-            log "正在重试..."
-            attempt=$((attempt + 1))
-            sleep 5
-        else
-            log "${RED}所有重试均失败 for $addr${NC}"
-            return 1
-        fi
+
+        attempt=$((attempt + 1))
+        sleep 5
     done
+
+    log "${RED}所有授权重试失败 for $addr${NC}"
+    return 1
 }
 
 # 兑换 PRIOR 为 USDC
@@ -546,15 +555,11 @@ swap_prior_to_usdc() {
 batch_swap_loop() {
     load_wallets
     load_proxies
+    load_config
     if [[ ${#wallets[@]} -eq 0 ]]; then
-        log "${RED}请先确保 $WALLETS_FILE 中有有效私钥（选项 2）。${NC}"
+        log "${RED}没有有效私钥，请先导入（选项 2）${NC}"
         return
     fi
-
-    swap_success=()
-    swap_failures=()
-    report_success=()
-    report_failures=()
 
     use_proxy=0
     if [[ ${#proxies[@]} -gt 0 ]]; then
