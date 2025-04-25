@@ -172,29 +172,53 @@ check_dependencies() {
 
 # 批量转账 ETH
 transfer_eth_batch() {
+    # 自动加载私钥
     load_wallets
     if [[ ${#wallets[@]} -eq 0 ]]; then
-        log "${RED}请先确保 $WALLETS_FILE 中有有效私钥（选项 2）。${NC}"
+        log "${RED}无法加载有效私钥，请检查 $WALLETS_FILE 文件是否存在、权限是否正确或私钥格式是否有效。${NC}"
+        log "${RED}文件是否存在：$( [[ -f "$WALLETS_FILE" ]] && echo '是' || echo '否' )${NC}"
+        log "${RED}文件内容：$(cat "$WALLETS_FILE" 2>/dev/null || echo '无法读取文件，可能无权限或文件不存在')${NC}"
+        log "${RED}提示：私钥需以 '0x' 开头，后跟 64 位十六进制字符（0-9, a-f, A-F），每行一个，无空行或注释。${NC}"
         return
     fi
 
-    if [[ ! -f "$RECIPIENTS_FILE" ]]; then
-        log "${RED}未找到 $RECIPIENTS_FILE 文件，正在创建...${NC}"
-        touch "$RECIPIENTS_FILE"
-        echo "请输入接收地址（每行一个，输入完成后按 Ctrl+D 或 Ctrl+C 结束）："
-        while IFS= read -r line; do
-            if [[ -n "$line" && "$line" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
-                echo "$line" >> "$RECIPIENTS_FILE"
-            else
-                log "${RED}无效地址格式（需以 0x 开头，40 位十六进制），已跳过：$line${NC}"
-            fi
-        done
-        echo "" # 换行
+    if [[ ${#wallets[@]} -lt 2 ]]; then
+        log "${RED}需要至少 2 个私钥以进行转账（选项 2）。${NC}"
+        return
     fi
 
-    mapfile -t recipients < <(grep -v '^#' "$RECIPIENTS_FILE")
-    if [[ ${#recipients[@]} -eq 0 ]]; then
-        log "${RED}$RECIPIENTS_FILE 为空，请添加接收地址后再试。${NC}"
+    # 检查 RPC 连通性（使用 POST 请求）
+    rpc_response=$(curl -s -X POST -H "Content-Type: application/json" --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' "$BASE_SEPOLIA_RPC" 2>/dev/null)
+    expected_chain_id="0x14a34"
+    actual_chain_id=$(echo "$rpc_response" | jq -r '.result')
+    if [[ -z "$rpc_response" || "$actual_chain_id" != "$expected_chain_id" ]]; then
+        log "${RED}无法连接到 Base Sepolia RPC ($BASE_SEPOLIA_RPC)，请检查网络或 RPC 地址。${NC}"
+        log "${RED}RPC 响应：${rpc_response:-'无响应'}${NC}"
+        return
+    fi
+
+    # 获取第一个私钥作为发送方
+    sender_pk="${wallets[0]}"
+    sender_addr=$(cast wallet address --private-key "$sender_pk")
+    if [[ -z "$sender_addr" || ! "$sender_addr" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+        log "${RED}第一个私钥生成的发送地址无效：$sender_addr${NC}"
+        return
+    fi
+
+    # 从其余私钥生成接收地址
+    declare -a recipient_addresses
+    for ((i=1; i<${#wallets[@]}; i++)); do
+        pk="${wallets[$i]}"
+        addr=$(cast wallet address --private-key "$pk")
+        if [[ -n "$addr" && "$addr" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+            recipient_addresses+=("$addr")
+        else
+            log "${RED}无效私钥生成的地址，已跳过：$addr${NC}"
+        fi
+    done
+
+    if [[ ${#recipient_addresses[@]} -eq 0 ]]; then
+        log "${RED}没有有效的接收地址（需要至少 1 个）。${NC}"
         return
     fi
 
@@ -204,67 +228,64 @@ transfer_eth_batch() {
         return
     fi
 
-    if ! curl -s --head "$BASE_SEPOLIA_RPC" | grep "200" >/dev/null; then
-        log "${RED}无法连接到 Base Sepolia RPC ($BASE_SEPOLIA_RPC)，请检查网络或 RPC 地址。${NC}"
+    # 检查发送方余额
+    balance_wei=$(cast balance "$sender_addr" --rpc-url "$BASE_SEPOLIA_RPC" 2>/dev/null)
+    if [[ -z "$balance_wei" || ! "$balance_wei" =~ ^[0-9]+$ ]]; then
+        log "${RED}无法获取 $sender_addr 的余额，请检查 RPC 或私钥。${NC}"
         return
     fi
 
-    for pk in "${wallets[@]}"; do
-        from=$(cast wallet address --private-key "$pk")
-        balance_wei=$(cast balance "$from" --rpc-url "$BASE_SEPOLIA_RPC" 2>/dev/null)
-        if [[ -z "$balance_wei" || ! "$balance_wei" =~ ^[0-9]+$ ]]; then
-            log "${RED}无法获取 $from 的余额，请检查 RPC 或私钥。${NC}"
-            continue
+    balance_eth=$(printf "scale=18; %s / 1000000000000000000\n" "$balance_wei" | bc)
+    amount_wei=$(printf "scale=0; %s * 1000000000000000000 / 1\n" "$amount" | bc)
+
+    for to in "${recipient_addresses[@]}"; do
+        # 检查余额是否足够
+        if [[ $(printf "%s < %s\n" "$balance_eth" "$amount" | bc) -eq 1 ]]; then
+            log "${RED}余额不足: $balance_eth ETH < $amount ETH（$sender_addr）${NC}"
+            break
         fi
 
-        balance_eth=$(printf "scale=18; %s / 1000000000000000000\n" "$balance_wei" | bc)
-        amount_wei=$(printf "scale=0; %s * 1000000000000000000 / 1\n" "$amount" | bc)
-        total_amount=$(printf "scale=18; %s * %s\n" "$amount" "${#recipients[@]}" | bc)
+        attempt=1
+        max_retries=2
+        while [[ $attempt -le $max_retries ]]; do
+            log "[$sender_addr -> $to] 转账尝试 $attempt/$max_retries..."
+            gas_price=$(cast gas-price --rpc-url "$BASE_SEPOLIA_RPC" 2>/dev/null)
+            if [[ -z "$gas_price" ]]; then
+                log "${RED}无法获取 gas 价格，请检查 RPC。${NC}"
+                break
+            fi
 
-        if [[ $(printf "%s < %s\n" "$balance_eth" "$total_amount" | bc) -eq 1 ]]; then
-            log "${RED}余额不足: $balance_eth ETH < $total_amount ETH（$from）${NC}"
-            continue
-        fi
-
-        for to in "${recipients[@]}"; do
-            attempt=1
-            max_retries=2
-            while [[ $attempt -le $max_retries ]]; do
-                log "[$from -> $to] 转账尝试 $attempt/$max_retries..."
-                gas_price=$(cast gas-price --rpc-url "$BASE_SEPOLIA_RPC" 2>/dev/null)
-                if [[ -z "$gas_price" ]]; then
-                    log "${RED}无法获取 gas 价格，请检查 RPC。${NC}"
+            tx_output=$(cast send --private-key "$sender_pk" --rpc-url "$BASE_SEPOLIA_RPC" --value "$amount_wei" --gas-price "$gas_price" --gas-limit 21000 "$to" --json 2>&1)
+            tx_hash=$(echo "$tx_output" | jq -r '.transactionHash' 2>/dev/null)
+            if [[ -n "$tx_hash" && "$tx_hash" != "null" ]]; then
+                sleep 10
+                status=$(cast receipt "$tx_hash" --rpc-url "$BASE_SEPOLIA_RPC" --json 2>/dev/null | jq -r '.status')
+                if [[ "$status" == "0x1" ]]; then
+                    log "${GREEN}[$sender_addr -> $to] 转账成功: $tx_hash${NC}"
+                    # 更新余额
+                    balance_wei=$(cast balance "$sender_addr" --rpc-url "$BASE_SEPOLIA_RPC" 2>/dev/null)
+                    balance_eth=$(printf "scale=18; %s / 1000000000000000000\n" "$balance_wei" | bc)
                     break
-                fi
-
-                tx_output=$(cast send --private-key "$pk" --rpc-url "$BASE_SEPOLIA_RPC" --value "$amount_wei" --gas-price "$gas_price" --gas-limit 21000 "$to" --json 2>&1)
-                tx_hash=$(echo "$tx_output" | jq -r '.transactionHash' 2>/dev/null)
-                if [[ -n "$tx_hash" && "$tx_hash" != "null" ]]; then
-                    sleep 10
-                    status=$(cast receipt "$tx_hash" --rpc-url "$BASE_SEPOLIA_RPC" --json 2>/dev/null | jq -r '.status')
-                    if [[ "$status" == "0x1" ]]; then
-                        log "${GREEN}[$from -> $to] 转账成功: $tx_hash${NC}"
-                        break
-                    else
-                        log "${RED}[$from -> $to] 转账失败: $tx_hash（状态: $status）${NC}"
-                    fi
                 else
-                    log "${RED}[$from -> $to] 转账发送失败: $tx_output${NC}"
+                    log "${RED}[$sender_addr -> $to] 转账失败: $tx_hash（状态: $status）${NC}"
                 fi
+            else
+                log "${RED}[$sender_addr -> $to] 转账发送失败: $tx_output${NC}"
+            fi
 
-                if [[ $attempt -lt $max_retries ]]; then
-                    log "正在重试..."
-                    attempt=$((attempt + 1))
-                    sleep 5
-                else
-                    log "${RED}[$from -> $to] 所有重试均失败${NC}"
-                    break
-                fi
-            done
-            sleep 2
+            if [[ $attempt -lt $max_retries ]]; then
+                log "正在重试..."
+                attempt=$((attempt + 1))
+                sleep 5
+            else
+                log "${RED}[$sender_addr -> $to] 所有重试均失败${NC}"
+                break
+            fi
         done
+        sleep 2
     done
 }
+
 
 # 批量领取 PRIOR 测试币
 batch_faucet() {
