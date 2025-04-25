@@ -70,13 +70,9 @@ user:pass@ip:port
 http://user:pass@ip:port
 ```
 
-### 转账接收地址（用于转 ETH 功能）
+### 批量转账（用于转 base sepolia ETH 功能）
+把第一个私钥地址中的ETH转到其它私钥地址
 
-创建 `recipients.txt`，每行一个地址：
-
-```
-0x12ab...
-0x34cd...
 ```
 
 ---
