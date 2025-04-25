@@ -132,6 +132,8 @@ load_config() {
 MAX_SWAPS=1
 SWAP_AMOUNT=0.1
 COUNTDOWN_TIMER=86400
+DINGDING_WEBHOOK=""
+DINGDING_SECRET=""
 EOF
         source "$CONFIG_FILE"
     fi
@@ -172,7 +174,6 @@ check_dependencies() {
 
 # 批量转账 ETH
 transfer_eth_batch() {
-    # 自动加载私钥
     load_wallets
     if [[ ${#wallets[@]} -eq 0 ]]; then
         log "${RED}无法加载有效私钥，请检查 $WALLETS_FILE 文件是否存在、权限是否正确或私钥格式是否有效。${NC}"
@@ -187,7 +188,6 @@ transfer_eth_batch() {
         return
     fi
 
-    # 检查 RPC 连通性（使用 POST 请求）
     rpc_response=$(curl -s -X POST -H "Content-Type: application/json" --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' "$BASE_SEPOLIA_RPC" 2>/dev/null)
     expected_chain_id="0x14a34"
     actual_chain_id=$(echo "$rpc_response" | jq -r '.result')
@@ -197,7 +197,6 @@ transfer_eth_batch() {
         return
     fi
 
-    # 获取第一个私钥作为发送方
     sender_pk="${wallets[0]}"
     sender_addr=$(cast wallet address --private-key "$sender_pk")
     if [[ -z "$sender_addr" || ! "$sender_addr" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
@@ -205,7 +204,6 @@ transfer_eth_batch() {
         return
     fi
 
-    # 从其余私钥生成接收地址
     declare -a recipient_addresses
     for ((i=1; i<${#wallets[@]}; i++)); do
         pk="${wallets[$i]}"
@@ -228,7 +226,6 @@ transfer_eth_batch() {
         return
     fi
 
-    # 检查发送方余额
     balance_wei=$(cast balance "$sender_addr" --rpc-url "$BASE_SEPOLIA_RPC" 2>/dev/null)
     if [[ -z "$balance_wei" || ! "$balance_wei" =~ ^[0-9]+$ ]]; then
         log "${RED}无法获取 $sender_addr 的余额，请检查 RPC 或私钥。${NC}"
@@ -239,7 +236,6 @@ transfer_eth_batch() {
     amount_wei=$(printf "scale=0; %s * 1000000000000000000 / 1\n" "$amount" | bc)
 
     for to in "${recipient_addresses[@]}"; do
-        # 检查余额是否足够
         if [[ $(printf "%s < %s\n" "$balance_eth" "$amount" | bc) -eq 1 ]]; then
             log "${RED}余额不足: $balance_eth ETH < $amount ETH（$sender_addr）${NC}"
             break
@@ -262,7 +258,6 @@ transfer_eth_batch() {
                 status=$(cast receipt "$tx_hash" --rpc-url "$BASE_SEPOLIA_RPC" --json 2>/dev/null | jq -r '.status')
                 if [[ "$status" == "0x1" ]]; then
                     log "${GREEN}[$sender_addr -> $to] 转账成功: $tx_hash${NC}"
-                    # 更新余额
                     balance_wei=$(cast balance "$sender_addr" --rpc-url "$BASE_SEPOLIA_RPC" 2>/dev/null)
                     balance_eth=$(printf "scale=18; %s / 1000000000000000000\n" "$balance_wei" | bc)
                     break
@@ -285,7 +280,6 @@ transfer_eth_batch() {
         sleep 2
     done
 }
-
 
 # 批量领取 PRIOR 测试币
 batch_faucet() {
@@ -362,13 +356,11 @@ approve_prior() {
     local pk="$1"
     local addr=$(cast wallet address --private-key "$pk")
     
-    # 检查地址有效性
     if [[ -z "$addr" || ! "$addr" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
         log "${RED}无效钱包地址: $addr${NC}"
         return 1
     fi
 
-    # 检查 ETH 余额
     local eth_bal_wei=$(cast balance "$addr" --rpc-url "$BASE_SEPOLIA_RPC" 2>/dev/null)
     local eth_bal=$(echo "scale=18; $eth_bal_wei / 10^18" | bc)
     if [[ $(echo "$eth_bal < 0.001" | bc) -eq 1 ]]; then
@@ -376,13 +368,11 @@ approve_prior() {
         return 1
     fi
 
-    # 检查 RPC 连接
     if ! curl -s --head "$BASE_SEPOLIA_RPC" | grep "200" >/dev/null; then
         log "${RED}无法连接到 Base Sepolia RPC ($BASE_SEPOLIA_RPC)，请检查网络或 RPC 地址${NC}"
         return 1
     fi
 
-    # 检查现有授权
     local allowance=$(cast call "$PRIOR_TOKEN" "allowance(address,address)(uint256)" "$addr" "$SWAP_ROUTER" --rpc-url "$BASE_SEPOLIA_RPC" 2>/dev/null | awk '{print $1}')
     if [[ -z "$allowance" ]]; then
         log "${RED}无法获取 $addr 的授权信息，请检查 RPC 或合约地址${NC}"
@@ -395,7 +385,6 @@ approve_prior() {
         return 0
     fi
 
-    # 执行授权
     log "${CYAN}授权 PRIOR 代币给 Swap Router for $addr...${NC}"
     local approve_amount=$(cast to-wei 1000 ether)
     local data=$(cast calldata "approve(address,uint256)" "$SWAP_ROUTER" "$approve_amount")
@@ -440,14 +429,12 @@ swap_prior_to_usdc() {
     local proxy="$2"
     local addr=$(cast wallet address --private-key "$pk")
     
-    # 检查地址有效性
     if [[ -z "$addr" || ! "$addr" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
         log "${RED}无效钱包地址: $addr${NC}"
         swap_failures+=("$addr: 无效钱包地址")
         return 1
     fi
 
-    # 检查 PRIOR 余额
     local bal=$(cast call "$PRIOR_TOKEN" "balanceOf(address)(uint256)" "$addr" --rpc-url "$BASE_SEPOLIA_RPC" | awk '{print $1}')
     local pri_bal=$(echo "scale=18; $bal / 10^18" | bc)
     if [[ $(echo "$pri_bal < $SWAP_AMOUNT" | bc) -eq 1 ]]; then
@@ -456,7 +443,6 @@ swap_prior_to_usdc() {
         return 1
     fi
 
-    # 检查 ETH 余额
     local eth_bal_wei=$(cast balance "$addr" --rpc-url "$BASE_SEPOLIA_RPC" 2>/dev/null)
     local eth_bal=$(echo "scale=18; $eth_bal_wei / 10^18" | bc)
     if [[ $(echo "$eth_bal < 0.001" | bc) -eq 1 ]]; then
@@ -465,14 +451,12 @@ swap_prior_to_usdc() {
         return 1
     fi
 
-    # 授权 PRIOR
     if ! approve_prior "$pk"; then
         log "${RED}授权失败，跳过 $addr 的 Swap${NC}"
         swap_failures+=("$addr: 授权失败")
         return 1
     fi
 
-    # 执行 Swap
     local amount_wei=$(echo "$SWAP_AMOUNT * 10^18" | bc | cut -d. -f1)
     local swap_data="0x8ec7baf1000000000000000000000000000000000000000000000000016345785d8a0000"
     local gas=$(cast gas-price --rpc-url "$BASE_SEPOLIA_RPC")
@@ -489,7 +473,6 @@ swap_prior_to_usdc() {
             if [[ "$status" == "0x1" ]]; then
                 log "${GREEN}Swap 成功 for $addr: $tx_hash${NC}"
                 
-                # 验证余额变化
                 local new_bal=$(cast call "$PRIOR_TOKEN" "balanceOf(address)(uint256)" "$addr" --rpc-url "$BASE_SEPOLIA_RPC" | awk '{print $1}')
                 local new_pri_bal=$(echo "scale=2; $new_bal / 10^18" | bc)
                 log "PRIOR 余额 after Swap: $new_pri_bal"
@@ -498,7 +481,6 @@ swap_prior_to_usdc() {
                 local new_usdc_bal=$(echo "scale=2; $usdc_bal / 10^$usdc_decimals" | bc)
                 log "USDC 余额: $new_usdc_bal"
 
-                # 获取 blockNumber（转换为十进制）
                 local block_number_hex=$(cast receipt "$tx_hash" --rpc-url "$BASE_SEPOLIA_RPC" --json 2>/dev/null | jq -r '.blockNumber')
                 local block_number=$(printf "%d" "$block_number_hex" 2>/dev/null)
                 if [[ -z "$block_number" || ! "$block_number" =~ ^[0-9]+$ ]]; then
@@ -508,7 +490,6 @@ swap_prior_to_usdc() {
                 fi
                 log "Block Number: $block_number"
 
-                # 构造 JSON payload
                 local payload="{\"userId\":\"$addr\",\"type\":\"swap\",\"txHash\":\"$tx_hash\",\"fromToken\":\"PRIOR\",\"toToken\":\"USDC\",\"fromAmount\":\"$SWAP_AMOUNT\",\"toAmount\":\"0.2\",\"status\":\"completed\",\"blockNumber\":$block_number}"
                 echo "$payload" | jq . > /dev/null 2>&1
                 if [[ $? -ne 0 ]]; then
@@ -518,7 +499,6 @@ swap_prior_to_usdc() {
                 fi
                 log "${CYAN}JSON Payload: $payload${NC}"
 
-                # 上报 Swap
                 local curl_cmd="curl -s -X POST \"https://prior-protocol-testnet-priorprotocol.replit.app/api/transactions\" \
                     -H \"Content-Type: application/json\" \
                     -H \"User-Agent: Mozilla/5.0\" \
@@ -603,210 +583,200 @@ batch_swap_loop() {
     done
 }
 
-# 发送钉钉通知
-send_dingding_notification() {
+# 发送钉钉测试通知
+send_dingding_test_notification() {
     local webhook_url="$1"
     local secret="$2"
-    local total_wallets="${#wallets[@]}"
-    local faucet_success_count="${#faucet_success[@]}"
-    local faucet_failure_count="${#faucet_failures[@]}"
-    local swap_success_count="${#swap_success[@]}"
-    local swap_failure_count="${#swap_failures[@]}"
-    local report_success_count="${#report_success[@]}"
-    local report_failure_count="${#report_failures[@]}"
 
-    # 构造失败详情
-    local faucet_failure_details=""
-    for failure in "${faucet_failures[@]}"; do
-        faucet_failure_details+="- $failure\n"
-    done
-    if [[ -z "$faucet_failure_details" ]]; then
-        faucet_failure_details="无"
-    fi
-
-    local swap_failure_details=""
-    for failure in "${swap_failures[@]}"; do
-        swap_failure_details+="- $failure\n"
-    done
-    if [[ -z "$swap_failure_details" ]]; then
-        swap_failure_details="无"
-    fi
-
-    local report_failure_details=""
-    for failure in "${report_failures[@]}"; do
-        report_failure_details+="- $failure\n"
-    done
-    if [[ -z "$report_failure_details" ]]; then
-        report_failure_details="无"
-    fi
-
-    # 生成钉钉签名
     local timestamp=$(date +%s%3N)
-    local string_to_sign="${timestamp}\n${secret}"
-    local sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64)
-    local encoded_sign=$(printf %s "$sign" | jq -r '@uri')
+    local string_to_sign="${timestamp}"$'\n'"${secret}"
+    local sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | sed 's/+/%2B/g; s/\//%2F/g; s/=/%3D/g')
+    local url="${webhook_url}&timestamp=${timestamp}&sign=${sign}"
 
-    # 构造 Markdown 消息
-    local markdown_content="### Prior Auto Bot 执行报告\n"
-    markdown_content+="**执行时间**: $(date '+%Y-%m-%d %H:%M:%S')\n"
-    markdown_content+="**总私钥数**: $total_wallets\n\n"
-    markdown_content+="#### PRIOR 领水\n"
-    markdown_content+="- **成功**: $faucet_success_count\n"
-    markdown_content+="- **失败**: $faucet_failure_count\n"
-    markdown_content+="- **失败详情**:\n$faucet_failure_details\n\n"
-    markdown_content+="#### 兑换 PRIOR 为 USDC\n"
-    markdown_content+="- **成功**: $swap_success_count\n"
-    markdown_content+="- **失败**: $swap_failure_count\n"
-    markdown_content+="- **失败详情**:\n$swap_failure_details\n\n"
-    markdown_content+="#### API 上报\n"
-    markdown_content+="- **成功**: $report_success_count\n"
-    markdown_content+="- **失败**: $report_failure_count\n"
-    markdown_content+="- **失败详情**:\n$report_failure_details\n"
+    local payload='{
+      "msgtype": "text",
+      "text": {
+        "content": "PRIOR 自动化脚本：钉钉通知测试成功！"
+      }
+    }'
 
-    # 构造钉钉请求
-    local payload=$(jq -n --arg msgtype "markdown" \
-        --arg title "Prior Auto Bot 执行报告" \
-        --arg text "$markdown_content" \
-        '{msgtype: $msgtype, markdown: {title: $title, text: $text}}')
-
-    # 发送请求
-    local response=$(curl -s "$webhook_url?timestamp=$timestamp&sign=$encoded_sign" \
-        -H 'Content-Type: application/json' \
-        -d "$payload")
+    local response=$(curl -s "$url" -H 'Content-Type: application/json' -d "$payload")
     local errcode=$(echo "$response" | jq -r '.errcode')
     if [[ "$errcode" == "0" ]]; then
-        log "${GREEN}钉钉通知发送成功${NC}"
+        log "${GREEN}钉钉测试通知发送成功${NC}"
+        return 0
     else
-        log "${RED}钉钉通知发送失败: $response${NC}"
+        log "${RED}钉钉测试通知发送失败: $response${NC}"
+        return 1
     fi
 }
 
-# 后台执行任务
-run_in_background() {
-    WORK_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-    # 加载配置和钱包
+# 发送钉钉通知
+run_foreground() {
+    WORK_DIR="$HOME/prior"
+    mkdir -p "$WORK_DIR"
+    LOG_FILE="$WORK_DIR/operation_$(date +%F).log"
+
     load_wallets
     load_proxies
     load_config
 
     if [[ ${#wallets[@]} -eq 0 ]]; then
-        log "${RED}没有有效的私钥，请检查 $WALLETS_FILE 文件内容或重新导入。${NC}"
+        log "${RED}没有有效的私钥，请先导入（选项 2）。${NC}"
         return
     fi
 
-    if [[ ${#proxies[@]} -eq 0 ]]; then
-        log "${YELLOW}没有检测到代理配置，直接运行任务...${NC}"
-    fi
+    # 如果 config.env 中 webhook 或 secret 没配置，提示一次
+    if [[ -z "$DINGDING_WEBHOOK" || "$DINGDING_WEBHOOK" == "\"\"" || -z "$DINGDING_SECRET" || "$DINGDING_SECRET" == "\"\"" ]]; then
+        read -p "是否启用钉钉监控？（y/n）： " enable_dingding
+        if [[ "$enable_dingding" =~ ^[Yy]$ ]]; then
+            read -p "请输入钉钉 Webhook URL： " webhook_url
+            read -p "请输入钉钉 Secret： " secret
 
-    # 是否启用钉钉监控
-    read -p "是否启用钉钉监控？（y/n）: " enable_dingding
-    local webhook_url=""
-    local secret=""
-    if [[ "$enable_dingding" =~ ^[Yy]$ ]]; then
-        read -p "请输入钉钉 Webhook URL: " webhook_url
-        read -p "请输入钉钉 Secret: " secret
-        if [[ -z "$webhook_url" || -z "$secret" ]]; then
-            log "${RED}Webhook URL 和 Secret 不能为空，禁用钉钉监控${NC}"
-            enable_dingding="n"
+            # 写入 config.env
+            sed -i "/DINGDING_WEBHOOK=/c\DINGDING_WEBHOOK=\"$webhook_url\"" "$CONFIG_FILE"
+            sed -i "/DINGDING_SECRET=/c\DINGDING_SECRET=\"$secret\"" "$CONFIG_FILE"
+            DINGDING_WEBHOOK="$webhook_url"
+            DINGDING_SECRET="$secret"
+            log "${GREEN}钉钉配置已保存到 $CONFIG_FILE${NC}"
         else
-            webhook_url=$(echo "$webhook_url" | tr -d '\n\r' | xargs)
-            secret=$(echo "$secret" | tr -d '\n\r' | xargs)
-            log "${CYAN}Webhook URL: $webhook_url${NC}"
-            log "${CYAN}Secret: $secret${NC}"
-
-            local timestamp=$(date +%s%3N)
-            local string_to_sign="${timestamp}"$'\n'"${secret}"
-            local sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | sed 's/+/%2B/g; s/\//%2F/g; s/=/%3D/g')
-            local url="${webhook_url}&timestamp=${timestamp}&sign=${sign}"
-
-            local response=$(curl -s "$url" -H 'Content-Type: application/json' -d '{
-                "msgtype": "text",
-                "text": {
-                    "content": "✅ PRIOR 自动化脚本：钉钉通知测试成功！"
-                }
-            }')
-            local errcode=$(echo "$response" | jq -r '.errcode')
-            log "${CYAN}钉钉响应: $response${NC}"
-
-            if [[ "$errcode" != "0" ]]; then
-                log "${RED}钉钉测试通知失败，响应：$response${NC}"
-                read -p "钉钉通知测试失败，是否继续执行后台任务？（y/n）: " continue_task
-                if [[ "$continue_task" =~ ^[Nn]$ ]]; then
-                    log "${RED}用户选择不继续执行后台任务，任务已终止。${NC}"
-                    return
-                fi
-            else
-                log "${GREEN}钉钉通知测试成功！${NC}"
-            fi
+            DINGDING_WEBHOOK=""
+            DINGDING_SECRET=""
+            sed -i "/DINGDING_WEBHOOK=/c\DINGDING_WEBHOOK=\"\"" "$CONFIG_FILE"
+            sed -i "/DINGDING_SECRET=/c\DINGDING_SECRET=\"\"" "$CONFIG_FILE"
+            log "${CYAN}钉钉监控未启用${NC}"
         fi
-    fi
-
-    # 写入后台脚本（无引号EOF，允许变量替换）
-    cat << EOF > "$BACKGROUND_SCRIPT"
-#!/bin/bash
-source ~/.bashrc
-export PATH="\$HOME/.foundry/bin:\$PATH"
-WORK_DIR=\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)
-if [[ -f "\$WORK_DIR/prior.sh" ]]; then
-    source "\$WORK_DIR/prior.sh"
-else
-    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] 错误：无法找到 prior.sh 文件" >> "\$WORK_DIR/operation_\$(date +%F).log"
-    exit 1
-fi
-
-ENABLE_DINGDING="$enable_dingding"
-WEBHOOK_URL="$webhook_url"
-SECRET="$secret"
-
-while true; do
-    log "\${CYAN}开始新一轮任务: \$(date '+%Y-%m-%d %H:%M:%S')\${NC}"
-
-    faucet_success=()
-    faucet_failures=()
-    swap_success=()
-    swap_failures=()
-    report_success=()
-    report_failures=()
-
-    batch_faucet
-    batch_swap_loop
-
-    if [[ "\$ENABLE_DINGDING" =~ ^[Yy]$ ]]; then
-        send_dingding_notification "\$WEBHOOK_URL" "\$SECRET"
-    fi
-
-    log "\${CYAN}本轮任务完成，等待 \$COUNTDOWN_TIMER 秒（\$((COUNTDOWN_TIMER / 3600)) 小时）后开始下一轮...\${NC}"
-    sleep "\$COUNTDOWN_TIMER"
-done
-EOF
-
-    # 赋权
-    if [[ -f "$BACKGROUND_SCRIPT" ]]; then
-        chmod +x "$BACKGROUND_SCRIPT"
-        log "${GREEN}后台脚本 $BACKGROUND_SCRIPT 已创建并赋予执行权限${NC}"
     else
-        log "${RED}无法创建后台脚本 $BACKGROUND_SCRIPT，请检查写入权限${NC}"
-        return
+        log "${CYAN}已从 $CONFIG_FILE 加载钉钉配置${NC}"
     fi
 
-    # 检查后台任务是否已存在
-    if [[ -f "$PID_FILE" ]]; then
-        local pid=$(cat "$PID_FILE")
-        if ps -p "$pid" > /dev/null; then
-            log "${RED}后台任务已在运行（PID: $pid），请先停止后再启动${NC}"
-            return
+    # 钉钉测试通知（如果启用）
+    if [[ -n "$DINGDING_WEBHOOK" && -n "$DINGDING_SECRET" ]]; then
+        log "${CYAN}发送钉钉测试通知...${NC}"
+        if ! send_dingding_test_notification "$DINGDING_WEBHOOK" "$DINGDING_SECRET"; then
+            log "${RED}钉钉测试通知发送失败，请检查 Webhook URL 和 Secret 配置后重试。${NC}"
+            return 1
         fi
+    else
+        log "${CYAN}未配置钉钉监控，跳过测试通知${NC}"
     fi
 
-    # 启动后台任务
-    nohup "$BACKGROUND_SCRIPT" >> "$LOG_FILE" 2>&1 &
-    local pid=$!
-    echo "$pid" > "$PID_FILE"
-    log "${GREEN}后台任务已启动（PID: $pid），日志记录在 $LOG_FILE${NC}"
-    log "${CYAN}任务将每 $((COUNTDOWN_TIMER / 3600)) 小时执行一次领水和兑换${NC}"
+    log "${GREEN}启动前景任务，每 $COUNTDOWN_TIMER 秒执行一次领水、兑换和上报...${NC}"
+
+    while true; do
+        log "${CYAN}开始新一轮任务${NC}"
+
+        faucet_success=()
+        faucet_failures=()
+        swap_success=()
+        swap_failures=()
+        report_success=()
+        report_failures=()
+
+        # 1. 领水
+        log "${CYAN}开始批量领水...${NC}"
+        batch_faucet
+
+        # 2. 兑换
+        log "${CYAN}开始批量兑换...${NC}"
+        batch_swap_loop
+
+        # 3. 上报钉钉通知
+        if [[ -n "$DINGDING_WEBHOOK" && -n "$DINGDING_SECRET" ]]; then
+            send_dingding_notification "$DINGDING_WEBHOOK" "$DINGDING_SECRET"
+        else
+            log "${CYAN}未配置钉钉监控，跳过通知${NC}"
+        fi
+
+        log "${CYAN}任务完成，等待 $COUNTDOWN_TIMER 秒后继续...${NC}"
+        sleep "$COUNTDOWN_TIMER"
+    done
 }
 
+
+
+# 全面运行任务
+run_foreground() {
+    WORK_DIR="$HOME/prior"
+    mkdir -p "$WORK_DIR"
+    LOG_FILE="$WORK_DIR/operation_$(date +%F).log"
+
+    load_wallets
+    load_proxies
+    load_config
+
+    if [[ ${#wallets[@]} -eq 0 ]]; then
+        log "${RED}没有有效的私钥，请先导入（选项 2）。${NC}"
+        return
+    fi
+
+    # 如果 config.env 中 webhook 或 secret 没配置，提示一次
+    if [[ -z "$DINGDING_WEBHOOK" || "$DINGDING_WEBHOOK" == "\"\"" || -z "$DINGDING_SECRET" || "$DINGDING_SECRET" == "\"\"" ]]; then
+        read -p "是否启用钉钉监控？（y/n）： " enable_dingding
+        if [[ "$enable_dingding" =~ ^[Yy]$ ]]; then
+            read -p "请输入钉钉 Webhook URL： " webhook_url
+            read -p "请输入钉钉 Secret： " secret
+
+            # 写入 config.env
+            sed -i "/DINGDING_WEBHOOK=/c\DINGDING_WEBHOOK=\"$webhook_url\"" "$CONFIG_FILE"
+            sed -i "/DINGDING_SECRET=/c\DINGDING_SECRET=\"$secret\"" "$CONFIG_FILE"
+            DINGDING_WEBHOOK="$webhook_url"
+            DINGDING_SECRET="$secret"
+            log "${GREEN}钉钉配置已保存到 $CONFIG_FILE${NC}"
+        else
+            DINGDING_WEBHOOK=""
+            DINGDING_SECRET=""
+            sed -i "/DINGDING_WEBHOOK=/c\DINGDING_WEBHOOK=\"\"" "$CONFIG_FILE"
+            sed -i "/DINGDING_SECRET=/c\DINGDING_SECRET=\"\"" "$CONFIG_FILE"
+            log "${CYAN}钉钉监控未启用${NC}"
+        fi
+    else
+        log "${CYAN}已从 $CONFIG_FILE 加载钉钉配置${NC}"
+    fi
+
+    # 钉钉测试通知（如果启用）
+    if [[ -n "$DINGDING_WEBHOOK" && -n "$DINGDING_SECRET" ]]; then
+        log "${CYAN}发送钉钉测试通知...${NC}"
+        if ! send_dingding_test_notification "$DINGDING_WEBHOOK" "$DINGDING_SECRET"; then
+            log "${RED}钉钉测试通知发送失败，请检查 Webhook URL 和 Secret 配置后重试。${NC}"
+            return 1
+        fi
+    else
+        log "${CYAN}未配置钉钉监控，跳过测试通知${NC}"
+    fi
+
+    log "${GREEN}启动前景任务，每 $COUNTDOWN_TIMER 秒执行一次领水、兑换和上报...${NC}"
+
+    while true; do
+        log "${CYAN}开始新一轮任务${NC}"
+
+        faucet_success=()
+        faucet_failures=()
+        swap_success=()
+        swap_failures=()
+        report_success=()
+        report_failures=()
+
+        # 1. 领水
+        log "${CYAN}开始批量领水...${NC}"
+        batch_faucet
+
+        # 2. 兑换
+        log "${CYAN}开始批量兑换...${NC}"
+        batch_swap_loop
+
+        # 3. 上报钉钉通知
+        if [[ -n "$DINGDING_WEBHOOK" && -n "$DINGDING_SECRET" ]]; then
+            send_dingding_notification "$DINGDING_WEBHOOK" "$DINGDING_SECRET"
+        else
+            log "${CYAN}未配置钉钉监控，跳过通知${NC}"
+        fi
+
+        log "${CYAN}任务完成，等待 $COUNTDOWN_TIMER 秒后继续...${NC}"
+        sleep "$COUNTDOWN_TIMER"
+    done
+}
 
 
 # 修改配置
@@ -818,15 +788,21 @@ modify_config() {
     read -p "MAX_SWAPS ($MAX_SWAPS): " new_max_swaps
     read -p "SWAP_AMOUNT ($SWAP_AMOUNT): " new_swap_amount
     read -p "COUNTDOWN_TIMER ($COUNTDOWN_TIMER): " new_countdown_timer
+    read -p "DINGDING_WEBHOOK ($DINGDING_WEBHOOK): " new_webhook
+    read -p "DINGDING_SECRET ($DINGDING_SECRET): " new_secret
 
     new_max_swaps=${new_max_swaps:-$MAX_SWAPS}
     new_swap_amount=${new_swap_amount:-$SWAP_AMOUNT}
     new_countdown_timer=${new_countdown_timer:-$COUNTDOWN_TIMER}
+    new_webhook=${new_webhook:-$DINGDING_WEBHOOK}
+    new_secret=${new_secret:-$DINGDING_SECRET}
 
     cat <<EOF > "$CONFIG_FILE"
 MAX_SWAPS=$new_max_swaps
 SWAP_AMOUNT=$new_swap_amount
 COUNTDOWN_TIMER=$new_countdown_timer
+DINGDING_WEBHOOK="$new_webhook"
+DINGDING_SECRET="$new_secret"
 EOF
     source "$CONFIG_FILE"
     log "${GREEN}配置已更新${NC}"
@@ -844,7 +820,7 @@ main_menu() {
         echo "5. 批量 PRIOR 领水"
         echo "6. 批量兑换 PRIOR 为 USDC"
         echo "7. 修改配置参数"
-        echo "8. 后台执行（每24小时领水、兑换、上报，带钉钉监控）"
+        echo "8. 全部执行（每24小时 PRIOR领水、兑换、上报，带钉钉监控）"
         echo "9. 退出"
         read -p "请选择（1-9）： " choice
 
@@ -856,7 +832,7 @@ main_menu() {
             5) batch_faucet;;
             6) batch_swap_loop;;
             7) modify_config;;
-            8) run_in_background;;
+            8) run_foreground;;
             9) log "退出程序..."; exit 0;;
             *) log "${RED}无效选项，请输入 1-9${NC}";;
         esac
