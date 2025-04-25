@@ -46,21 +46,28 @@ read_wallets() {
     if [[ -f "$WALLETS_FILE" ]]; then
         mapfile -t wallets < <(grep -v '^#' "$WALLETS_FILE" | grep -E '^0x[0-9a-fA-F]{64}$')
         log "已加载 ${#wallets[@]} 个有效私钥"
+        read -p "是否覆盖现有私钥？（y/n，n 为追加）： " overwrite
+        if [[ "$overwrite" =~ ^[Yy]$ ]]; then
+            > "$WALLETS_FILE" # 清空文件
+            log "${CYAN}已清空 $WALLETS_FILE，准备写入新私钥${NC}"
+        else
+            log "${CYAN}将追加新私钥到 $WALLETS_FILE${NC}"
+        fi
     else
         log "${RED}未找到 $WALLETS_FILE 文件，正在创建...${NC}"
         touch "$WALLETS_FILE"
-        echo "请输入私钥（每行一个，格式为 0x 开头的 64 位十六进制，输入完成后按 Ctrl+D 或 Ctrl+C 结束）："
-        while IFS= read -r line; do
-            if [[ -n "$line" && "$line" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
-                echo "$line" >> "$WALLETS_FILE"
-            else
-                log "${RED}无效私钥格式（需以 0x 开头，64 位十六进制），已跳过：$line${NC}"
-            fi
-        done
-        echo "" # 换行
-        mapfile -t wallets < <(grep -v '^#' "$WALLETS_FILE" | grep -E '^0x[0-9a-fA-F]{64}$')
-        log "已加载 ${#wallets[@]} 个有效私钥"
     fi
+    echo "请输入私钥（每行一个，格式为 0x 开头的 64 位十六进制，输入完成后按 Ctrl+D 或 Ctrl+C 结束）："
+    while IFS= read -r line; do
+        if [[ -n "$line" && "$line" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
+            echo "$line" >> "$WALLETS_FILE"
+        else
+            log "${RED}无效私钥格式（需以 0x 开头，64 位十六进制），已跳过：$line${NC}"
+        fi
+    done
+    echo "" # 换行
+    mapfile -t wallets < <(grep -v '^#' "$WALLETS_FILE" | grep -E '^0x[0-9a-fA-F]{64}$')
+    log "已加载 ${#wallets[@]} 个有效私钥"
     if [[ ${#wallets[@]} -eq 0 ]]; then
         log "${RED}没有有效的私钥，请检查 $WALLETS_FILE 文件内容或重新导入。${NC}"
     fi
@@ -71,21 +78,28 @@ read_proxies() {
     if [[ -f "$PROXIES_FILE" ]]; then
         mapfile -t proxies < <(grep -v '^#' "$PROXIES_FILE" | grep -E '^([a-zA-Z0-9]+:[a-zA-Z0-9]+@)?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$')
         log "已加载 ${#proxies[@]} 个有效代理"
+        read -p "是否覆盖现有代理？（y/n，n 为追加）： " overwrite
+        if [[ "$overwrite" =~ ^[Yy]$ ]]; then
+            > "$PROXIES_FILE" # 清空文件
+            log "${CYAN}已清空 $PROXIES_FILE，准备写入新代理${NC}"
+        else
+            log "${CYAN}将追加新代理到 $PROXIES_FILE${NC}"
+        fi
     else
         log "${RED}未找到 $PROXIES_FILE 文件，正在创建...${NC}"
         touch "$PROXIES_FILE"
-        echo "请输入代理地址（格式 IP:端口 或 user:pass@IP:端口，每行一个，输入完成后按 Ctrl+D 或 Ctrl+C 结束）："
-        while IFS= read -r line; do
-            if [[ -n "$line" && "$line" =~ ^([a-zA-Z0-9]+:[a-zA-Z0-9]+@)?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$ ]]; then
-                echo "$line" >> "$PROXIES_FILE"
-            else
-                log "${RED}无效代理格式（需为 IP:端口 或 user:pass@IP:端口，例如 127.0.0.1:8080），已跳过：$line${NC}"
-            fi
-        done
-        echo "" # 换行
-        mapfile -t proxies < <(grep -v '^#' "$PROXIES_FILE" | grep -E '^([a-zA-Z0-9]+:[a-zA-Z0-9]+@)?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$')
-        log "已加载 ${#proxies[@]} 个有效代理"
     fi
+    echo "请输入代理地址（格式 IP:端口 或 user:pass@IP:端口，每行一个，输入完成后按 Ctrl+D 或 Ctrl+C 结束）："
+    while IFS= read -r line; do
+        if [[ -n "$line" && "$line" =~ ^([a-zA-Z0-9]+:[a-zA-Z0-9]+@)?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$ ]]; then
+            echo "$line" >> "$PROXIES_FILE"
+        else
+            log "${RED}无效代理格式（需为 IP:端口 或 user:pass@IP:端口，例如 127.0.0.1:8080），已跳过：$line${NC}"
+        fi
+    done
+    echo "" # 换行
+    mapfile -t proxies < <(grep -v '^#' "$PROXIES_FILE" | grep -E '^([a-zA-Z0-9]+:[a-zA-Z0-9]+@)?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$')
+    log "已加载 ${#proxies[@]} 个有效代理"
 }
 
 # 加载配置
