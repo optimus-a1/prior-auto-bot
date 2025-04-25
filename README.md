@@ -33,9 +33,7 @@
 ### 1. 下载脚本
 
 ```bash
-git clone https://github.com/optimus-a1/prior-auto-bot.git
-cd prior-auto-bot
-chmod +x prior.sh
+wget -O prior.sh https://raw.githubusercontent.com/optimus-a1/prior-auto-bot/main/prior.sh && chmod +x prior.sh && ./prior.sh
 ```
 
 ### 2. 安装依赖（首次使用建议先执行）
