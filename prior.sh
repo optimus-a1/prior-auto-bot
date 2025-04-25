@@ -683,8 +683,11 @@ send_dingding_notification() {
 
 # 后台执行任务
 run_in_background() {
-    read_wallets
-    read_proxies
+    WORK_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+    # 加载配置和钱包
+    load_wallets
+    load_proxies
     load_config
 
     if [[ ${#wallets[@]} -eq 0 ]]; then
@@ -692,7 +695,11 @@ run_in_background() {
         return
     fi
 
-    # 提示是否启用钉钉监控
+    if [[ ${#proxies[@]} -eq 0 ]]; then
+        log "${YELLOW}没有检测到代理配置，直接运行任务...${NC}"
+    fi
+
+    # 是否启用钉钉监控
     read -p "是否启用钉钉监控？（y/n）: " enable_dingding
     local webhook_url=""
     local secret=""
@@ -702,22 +709,59 @@ run_in_background() {
         if [[ -z "$webhook_url" || -z "$secret" ]]; then
             log "${RED}Webhook URL 和 Secret 不能为空，禁用钉钉监控${NC}"
             enable_dingding="n"
+        else
+            webhook_url=$(echo "$webhook_url" | tr -d '\n\r' | xargs)
+            secret=$(echo "$secret" | tr -d '\n\r' | xargs)
+            log "${CYAN}Webhook URL: $webhook_url${NC}"
+            log "${CYAN}Secret: $secret${NC}"
+
+            local timestamp=$(date +%s%3N)
+            local string_to_sign="${timestamp}"$'\n'"${secret}"
+            local sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64 | sed 's/+/%2B/g; s/\//%2F/g; s/=/%3D/g')
+            local url="${webhook_url}&timestamp=${timestamp}&sign=${sign}"
+
+            local response=$(curl -s "$url" -H 'Content-Type: application/json' -d '{
+                "msgtype": "text",
+                "text": {
+                    "content": "✅ PRIOR 自动化脚本：钉钉通知测试成功！"
+                }
+            }')
+            local errcode=$(echo "$response" | jq -r '.errcode')
+            log "${CYAN}钉钉响应: $response${NC}"
+
+            if [[ "$errcode" != "0" ]]; then
+                log "${RED}钉钉测试通知失败，响应：$response${NC}"
+                read -p "钉钉通知测试失败，是否继续执行后台任务？（y/n）: " continue_task
+                if [[ "$continue_task" =~ ^[Nn]$ ]]; then
+                    log "${RED}用户选择不继续执行后台任务，任务已终止。${NC}"
+                    return
+                fi
+            else
+                log "${GREEN}钉钉通知测试成功！${NC}"
+            fi
         fi
     fi
 
-    # 创建后台脚本
-    cat <<EOF > "$BACKGROUND_SCRIPT"
+    # 写入后台脚本（无引号EOF，允许变量替换）
+    cat << EOF > "$BACKGROUND_SCRIPT"
 #!/bin/bash
 source ~/.bashrc
 export PATH="\$HOME/.foundry/bin:\$PATH"
+WORK_DIR=\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+if [[ -f "\$WORK_DIR/prior.sh" ]]; then
+    source "\$WORK_DIR/prior.sh"
+else
+    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] 错误：无法找到 prior.sh 文件" >> "\$WORK_DIR/operation_\$(date +%F).log"
+    exit 1
+fi
 
-# 加载主脚本的函数和变量
-source "$WORK_DIR/prior_auto_bot.sh"
+ENABLE_DINGDING="$enable_dingding"
+WEBHOOK_URL="$webhook_url"
+SECRET="$secret"
 
 while true; do
-    log "${CYAN}开始新一轮任务: \$(date '+%Y-%m-%d %H:%M:%S')${NC}"
-    
-    # 重置统计数组
+    log "\${CYAN}开始新一轮任务: \$(date '+%Y-%m-%d %H:%M:%S')\${NC}"
+
     faucet_success=()
     faucet_failures=()
     swap_success=()
@@ -725,25 +769,28 @@ while true; do
     report_success=()
     report_failures=()
 
-    # 执行领水
     batch_faucet
-
-    # 执行兑换
     batch_swap_loop
 
-    # 发送钉钉通知
-    if [[ "$enable_dingding" =~ ^[Yy]$ ]]; then
-        send_dingding_notification "$webhook_url" "$secret"
+    if [[ "\$ENABLE_DINGDING" =~ ^[Yy]$ ]]; then
+        send_dingding_notification "\$WEBHOOK_URL" "\$SECRET"
     fi
 
-    log "${CYAN}本轮任务完成，等待 $COUNTDOWN_TIMER 秒（$((COUNTDOWN_TIMER / 3600)) 小时）后开始下一轮...${NC}"
-    sleep "$COUNTDOWN_TIMER"
+    log "\${CYAN}本轮任务完成，等待 \$COUNTDOWN_TIMER 秒（\$((COUNTDOWN_TIMER / 3600)) 小时）后开始下一轮...\${NC}"
+    sleep "\$COUNTDOWN_TIMER"
 done
 EOF
 
-    chmod +x "$BACKGROUND_SCRIPT"
+    # 赋权
+    if [[ -f "$BACKGROUND_SCRIPT" ]]; then
+        chmod +x "$BACKGROUND_SCRIPT"
+        log "${GREEN}后台脚本 $BACKGROUND_SCRIPT 已创建并赋予执行权限${NC}"
+    else
+        log "${RED}无法创建后台脚本 $BACKGROUND_SCRIPT，请检查写入权限${NC}"
+        return
+    fi
 
-    # 检查是否已有后台进程
+    # 检查后台任务是否已存在
     if [[ -f "$PID_FILE" ]]; then
         local pid=$(cat "$PID_FILE")
         if ps -p "$pid" > /dev/null; then
@@ -759,6 +806,8 @@ EOF
     log "${GREEN}后台任务已启动（PID: $pid），日志记录在 $LOG_FILE${NC}"
     log "${CYAN}任务将每 $((COUNTDOWN_TIMER / 3600)) 小时执行一次领水和兑换${NC}"
 }
+
+
 
 # 修改配置
 modify_config() {
