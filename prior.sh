@@ -73,6 +73,16 @@ read_wallets() {
     fi
 }
 
+# 加载钱包（无用户交互，仅加载现有私钥）
+load_wallets() {
+    if [[ -f "$WALLETS_FILE" ]]; then
+        mapfile -t wallets < <(grep -v '^#' "$WALLETS_FILE" | grep -E '^0x[0-9a-fA-F]{64}$')
+        log "已加载 ${#wallets[@]} 个有效私钥"
+    else
+        log "${RED}未找到 $WALLETS_FILE 文件，请先导入私钥（选项 2）${NC}"
+    fi
+}
+
 # 读取代理
 read_proxies() {
     if [[ -f "$PROXIES_FILE" ]]; then
@@ -100,6 +110,16 @@ read_proxies() {
     echo "" # 换行
     mapfile -t proxies < <(grep -v '^#' "$PROXIES_FILE" | grep -E '^([a-zA-Z0-9]+:[a-zA-Z0-9]+@)?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$')
     log "已加载 ${#proxies[@]} 个有效代理"
+}
+
+# 加载代理（无用户交互，仅加载现有代理）
+load_proxies() {
+    if [[ -f "$PROXIES_FILE" ]]; then
+        mapfile -t proxies < <(grep -v '^#' "$PROXIES_FILE" | grep -E '^([a-zA-Z0-9]+:[a-zA-Z0-9]+@)?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$')
+        log "已加载 ${#proxies[@]} 个有效代理"
+    else
+        log "${CYAN}未找到 $PROXIES_FILE 文件，将不使用代理${NC}"
+    fi
 }
 
 # 加载配置
@@ -152,8 +172,9 @@ check_dependencies() {
 
 # 批量转账 ETH
 transfer_eth_batch() {
+    load_wallets
     if [[ ${#wallets[@]} -eq 0 ]]; then
-        log "${RED}请先确保 $WALLETS_FILE 中有有效私钥。${NC}"
+        log "${RED}请先确保 $WALLETS_FILE 中有有效私钥（选项 2）。${NC}"
         return
     fi
 
@@ -247,6 +268,7 @@ transfer_eth_batch() {
 
 # 批量领取 PRIOR 测试币
 batch_faucet() {
+    load_wallets
     if [[ ${#wallets[@]} -eq 0 ]]; then
         log "${RED}请先导入私钥（选项 2）。${NC}"
         return
@@ -521,8 +543,10 @@ swap_prior_to_usdc() {
 
 # 批量兑换循环
 batch_swap_loop() {
+    load_wallets
+    load_proxies
     if [[ ${#wallets[@]} -eq 0 ]]; then
-        log "${RED}请先确保 $WALLETS_FILE 中有有效私钥。${NC}"
+        log "${RED}请先确保 $WALLETS_FILE 中有有效私钥（选项 2）。${NC}"
         return
     fi
 
@@ -717,6 +741,7 @@ EOF
 
 # 修改配置
 modify_config() {
+    load_config
     log "${CYAN}当前配置：${NC}"
     cat "$CONFIG_FILE"
     echo -e "\n请输入新的配置值（直接回车保留原值）："
@@ -740,9 +765,6 @@ EOF
 # 主菜单
 main_menu() {
     log "${CYAN}Prior Auto Bot - Base Sepolia${NC}"
-    read_wallets
-    read_proxies
-    load_config
     while true; do
         echo -e "\n=== 菜单 ==="
         echo "1. 检查和安装依赖（安装后请执行 source ~/.bashrc）"
