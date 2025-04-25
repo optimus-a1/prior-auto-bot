@@ -86,7 +86,7 @@ http://user:pass@ip:port
 ### 启动主菜单
 
 ```bash
-./prior_auto_bot.sh
+./prior.sh
 ```
 
 菜单说明：
