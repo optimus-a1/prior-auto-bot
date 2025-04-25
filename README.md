@@ -33,7 +33,7 @@
 ### 1. 下载脚本
 
 ```bash
-git clone https://github.com/yourname/prior-auto-bot.git
+git clone https://github.com/optimus-a1/prior-auto-bot.git
 cd prior-auto-bot
 chmod +x prior_auto_bot.sh
 ```
