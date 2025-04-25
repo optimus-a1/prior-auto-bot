@@ -42,8 +42,8 @@ chmod +x prior.sh
 
 ```bash
 ./prior.sh
-选择菜单项：1（检查并安装依赖）
 ```
+选择菜单项：1（检查并安装依赖）
 
 > 💡 安装完 cast 后，执行 `source ~/.bashrc` 以确保环境变量生效
 
