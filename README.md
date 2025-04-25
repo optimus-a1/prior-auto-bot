@@ -73,7 +73,7 @@ http://user:pass@ip:port
 ### 批量转账（用于转 base sepolia ETH 功能）
 把第一个私钥地址中的ETH转到其它私钥地址
 
-```
+
 
 
 
