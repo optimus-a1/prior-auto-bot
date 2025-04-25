@@ -97,6 +97,36 @@ http://user:pass@ip:port
 
 ---
 
+## 🧪 建义用screen方式进行
+
+检查是否安装screen
+```bash
+screen --version
+```
+
+如果成功安装，它会显示 screen 的版本信息。
+
+
+screen 没有安装
+在 Ubuntu 上安装 screen，你可以运行以下命令：
+
+```bash
+sudo apt update
+sudo apt install screen
+```
+
+这将安装 screen 工具。如果你需要确认安装完成，可以运行：
+
+
+
+
+```bash
+screen -S prior
+./prior
+```
+选择“批量兑换 PRIOR 为 USDC菜单执行”就行，执行后按ctrl+D退出。前提是你的私钥已导入，Base Sepolia ETH和PRIOR 有水
+
+
 ## 🧪 自动流程说明
 
 当你执行菜单项 `8` 后，脚本会自动循环执行以下操作：
