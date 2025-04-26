@@ -433,18 +433,18 @@ approve_prior() {
 }
 
 # 兑换 PRIOR 为 USDC
-# 兑换 PRIOR 为 USDC
 swap_prior_to_usdc() {
     local pk="$1"
     local proxy="$2"
     local addr=$(cast wallet address --private-key "$pk")
-    
+
     if [[ -z "$addr" || ! "$addr" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
         log "${RED}无效钱包地址: $addr${NC}"
         swap_failures+=("$addr: 无效钱包地址")
         return 1
     fi
 
+    # 检查 PRIOR 余额
     local bal=$(cast call "$PRIOR_TOKEN" "balanceOf(address)(uint256)" "$addr" --rpc-url "$BASE_SEPOLIA_RPC" | awk '{print $1}')
     local pri_bal=$(echo "scale=18; $bal / 10^18" | bc)
     if [[ $(echo "$pri_bal < $SWAP_AMOUNT" | bc) -eq 1 ]]; then
@@ -453,6 +453,7 @@ swap_prior_to_usdc() {
         return 1
     fi
 
+    # 检查 ETH 余额
     local eth_bal_wei=$(cast balance "$addr" --rpc-url "$BASE_SEPOLIA_RPC" 2>/dev/null)
     local eth_bal=$(echo "scale=18; $eth_bal_wei / 10^18" | bc)
     if [[ $(echo "$eth_bal < 0.001" | bc) -eq 1 ]]; then
@@ -461,26 +462,36 @@ swap_prior_to_usdc() {
         return 1
     fi
 
+    # 授权 PRIOR
     if ! approve_prior "$pk"; then
         log "${RED}授权失败，跳过 $addr 的 Swap${NC}"
         swap_failures+=("$addr: 授权失败")
         return 1
     fi
 
-    # ====== 动态生成 swap_data 开始 ======
-    local function_selector="0x8ec7baf1"
-    local amount_wei=$(cast to-wei "$SWAP_AMOUNT" ether)
-    local amount_hex=$(printf "%064x" "$amount_wei")
-    local swap_data="${function_selector}${amount_hex}"
-    # ====== 动态生成 swap_data 结束 ======
+    # 动态生成 swap_data
+    local amount_in=$(cast to-wei "$SWAP_AMOUNT" ether)
+    local amount_out_min=0
+    local path="$PRIOR_TOKEN","$USDC_TOKEN"
+    local to="$addr"
+    local deadline=$(($(date +%s) + 1800))
+    local swap_data=$(cast calldata "swapExactTokensForTokens(uint256,uint256,address[],address,uint256)" "$amount_in" "$amount_out_min" "[$path]" "$to" "$deadline")
 
-    local gas=$(cast gas-price --rpc-url "$BASE_SEPOLIA_RPC")
+    # 抬高 gas price
+    local base_gas=$(cast gas-price --rpc-url "$BASE_SEPOLIA_RPC")
+    local gas=$(echo "$base_gas * 1.5" | bc | awk '{printf "%d", $1}')
 
     attempt=1
     max_retries=2
     while [[ $attempt -le $max_retries ]]; do
         log "${CYAN}Swap 尝试 $attempt/$max_retries for $addr...${NC}"
-        local tx_output=$(cast send --private-key "$pk" --rpc-url "$BASE_SEPOLIA_RPC" --gas-limit 300000 --gas-price "$gas" "$SWAP_ROUTER" "$swap_data" --json 2>/dev/null)
+        local tx_output=$(cast send --private-key "$pk" \
+            --rpc-url "$BASE_SEPOLIA_RPC" \
+            --gas-limit 300000 \
+            --gas-price "$gas" \
+            --legacy \
+            "$SWAP_ROUTER" "$swap_data" --json 2>/dev/null)
+
         local tx_hash=$(echo "$tx_output" | jq -r '.transactionHash')
 
         if [[ -n "$tx_hash" && "$tx_hash" != "null" ]]; then
@@ -500,6 +511,7 @@ swap_prior_to_usdc() {
 
                 local block_number_hex=$(cast receipt "$tx_hash" --rpc-url "$BASE_SEPOLIA_RPC" --json 2>/dev/null | jq -r '.blockNumber')
                 local block_number=$(printf "%d" "$block_number_hex" 2>/dev/null)
+
                 if [[ -z "$block_number" || ! "$block_number" =~ ^[0-9]+$ ]]; then
                     log "${RED}无法获取 blockNumber for $tx_hash${NC}"
                     swap_failures+=("$addr: 无法获取 blockNumber")
@@ -521,32 +533,36 @@ swap_prior_to_usdc() {
                     -H \"User-Agent: Mozilla/5.0\" \
                     -H \"Referer: https://testnetpriorprotocol.xyz/\" \
                     -d '$payload'"
+
                 if [[ -n "$proxy" ]]; then
-                    curl_cmd="$curl_cmd --proxy \"$proxy\""
                     log "${CYAN}使用代理 $proxy 上报 Swap...${NC}"
+                    curl_cmd="$curl_cmd --proxy \"$proxy\""
                 else
                     log "${CYAN}不使用代理上报 Swap...${NC}"
                 fi
-                local api_response=$(eval "$curl_cmd" | jq .)
-                local api_status=$(echo "$api_response" | jq -r '.status // "unknown"')
-                if [[ "$api_status" == "success" || $(echo "$api_response" | jq -r '.id') != "null" ]]; then
-                    log "${GREEN}Swap 上报成功 for $addr: $api_response${NC}"
-                    swap_success+=("$addr")
-                    report_success+=("$addr")
-                else
-                    log "${RED}Swap 上报失败 for $addr: $api_response${NC}"
-                    swap_success+=("$addr")
-                    report_failures+=("$addr: 上报失败 ($api_response)")
+
+                local api_response=$(eval "$curl_cmd")
+                if [[ -n "$api_response" ]]; then
+                    local api_status=$(echo "$api_response" | jq -r '.status // empty')
+                    if [[ "$api_status" == "success" || $(echo "$api_response" | jq -r '.id') != "null" ]]; then
+                        log "${GREEN}Swap 上报成功 for $addr: $api_response${NC}"
+                        swap_success+=("$addr")
+                        report_success+=("$addr")
+                    else
+                        log "${RED}Swap 上报失败 for $addr: $api_response${NC}"
+                        report_failures+=("$addr: 上报失败 ($api_response) ")
+                    fi
                 fi
                 return 0
             else
                 log "${RED}Swap 失败 for $addr: $tx_hash (状态: $status)${NC}"
-                swap_failures+=("$addr: Swap 交易失败 (状态: $status, TX: $tx_hash)")
+                swap_failures+=("$addr: Swap交易失败 (状态: $status, TX: $tx_hash)")
             fi
         else
-            log "${RED}Swap 交易发送失败 for $addr: $tx_output${NC}"
-            swap_failures+=("$addr: Swap 交易发送失败 ($tx_output)")
+            log "${RED}Swap交易发送失败 for $addr: $tx_output${NC}"
+            swap_failures+=("$addr: Swap发送失败 ($tx_output)")
         fi
+
         if [[ $attempt -lt $max_retries ]]; then
             log "正在重试..."
             attempt=$((attempt + 1))
@@ -558,6 +574,7 @@ swap_prior_to_usdc() {
         fi
     done
 }
+
 
 
 # 批量兑换循环
