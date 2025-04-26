@@ -469,28 +469,24 @@ swap_prior_to_usdc() {
         return 1
     fi
 
-    # 动态生成 swap_data
+    # 开始 Swap
     local amount_in=$(cast to-wei "$SWAP_AMOUNT" ether)
     local amount_out_min=0
     local path="$PRIOR_TOKEN","$USDC_TOKEN"
     local to="$addr"
-    local deadline=$(($(date +%s) + 1800))
+    local deadline=$(($(date +%s) + 1800))  # 当前时间+30分钟
+
+    # 动态生成 swapExactTokensForTokens calldata
     local swap_data=$(cast calldata "swapExactTokensForTokens(uint256,uint256,address[],address,uint256)" "$amount_in" "$amount_out_min" "[$path]" "$to" "$deadline")
 
-    # 抬高 gas price
-    local base_gas=$(cast gas-price --rpc-url "$BASE_SEPOLIA_RPC")
-    local gas=$(echo "$base_gas * 1.5" | bc | awk '{printf "%d", $1}')
+    local gas=$(cast gas-price --rpc-url "$BASE_SEPOLIA_RPC")
 
     attempt=1
     max_retries=2
     while [[ $attempt -le $max_retries ]]; do
         log "${CYAN}Swap 尝试 $attempt/$max_retries for $addr...${NC}"
-        local tx_output=$(cast send --private-key "$pk" \
-            --rpc-url "$BASE_SEPOLIA_RPC" \
-            --gas-limit 300000 \
-            --gas-price "$gas" \
-            --legacy \
-            "$SWAP_ROUTER" "$swap_data" --json 2>/dev/null)
+        local tx_output=$(cast send --private-key "$pk" --rpc-url "$BASE_SEPOLIA_RPC" --gas-limit 300000 --gas-price "$gas" --legacy "$SWAP_ROUTER" "$swap_data" --json 2>/dev/null)
+        #            👆👆👆👆👆 这里加了 --legacy
 
         local tx_hash=$(echo "$tx_output" | jq -r '.transactionHash')
 
@@ -511,7 +507,6 @@ swap_prior_to_usdc() {
 
                 local block_number_hex=$(cast receipt "$tx_hash" --rpc-url "$BASE_SEPOLIA_RPC" --json 2>/dev/null | jq -r '.blockNumber')
                 local block_number=$(printf "%d" "$block_number_hex" 2>/dev/null)
-
                 if [[ -z "$block_number" || ! "$block_number" =~ ^[0-9]+$ ]]; then
                     log "${RED}无法获取 blockNumber for $tx_hash${NC}"
                     swap_failures+=("$addr: 无法获取 blockNumber")
@@ -535,8 +530,8 @@ swap_prior_to_usdc() {
                     -d '$payload'"
 
                 if [[ -n "$proxy" ]]; then
-                    log "${CYAN}使用代理 $proxy 上报 Swap...${NC}"
                     curl_cmd="$curl_cmd --proxy \"$proxy\""
+                    log "${CYAN}使用代理 $proxy 上报 Swap...${NC}"
                 else
                     log "${CYAN}不使用代理上报 Swap...${NC}"
                 fi
@@ -550,7 +545,7 @@ swap_prior_to_usdc() {
                         report_success+=("$addr")
                     else
                         log "${RED}Swap 上报失败 for $addr: $api_response${NC}"
-                        report_failures+=("$addr: 上报失败 ($api_response) ")
+                        report_failures+=("$addr: 上报失败 ($api_response)")
                     fi
                 fi
                 return 0
@@ -574,6 +569,7 @@ swap_prior_to_usdc() {
         fi
     done
 }
+
 
 
 
