@@ -438,13 +438,14 @@ swap_prior_to_usdc() {
     local proxy="$2"
     local addr=$(cast wallet address --private-key "$pk")
 
+    # Validate wallet address
     if [[ -z "$addr" || ! "$addr" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
         log "${RED}无效钱包地址: $addr${NC}"
         swap_failures+=("$addr: 无效钱包地址")
         return 1
     fi
 
-    # 检查 PRIOR 余额
+    # Check PRIOR balance
     local bal=$(cast call "$PRIOR_TOKEN" "balanceOf(address)(uint256)" "$addr" --rpc-url "$BASE_SEPOLIA_RPC" | awk '{print $1}')
     local pri_bal=$(echo "scale=18; $bal / 10^18" | bc)
     if [[ $(echo "$pri_bal < $SWAP_AMOUNT" | bc) -eq 1 ]]; then
@@ -453,7 +454,7 @@ swap_prior_to_usdc() {
         return 1
     fi
 
-    # 检查 ETH 余额
+    # Check ETH balance
     local eth_bal_wei=$(cast balance "$addr" --rpc-url "$BASE_SEPOLIA_RPC" 2>/dev/null)
     local eth_bal=$(echo "scale=18; $eth_bal_wei / 10^18" | bc)
     if [[ $(echo "$eth_bal < 0.001" | bc) -eq 1 ]]; then
@@ -462,32 +463,28 @@ swap_prior_to_usdc() {
         return 1
     fi
 
-    # 授权 PRIOR
+    # Approve PRIOR token
     if ! approve_prior "$pk"; then
         log "${RED}授权失败，跳过 $addr 的 Swap${NC}"
         swap_failures+=("$addr: 授权失败")
         return 1
     fi
 
-    # 开始 Swap
+    # Construct swap data using the simpler function (0x8ec7baf1)
     local amount_in=$(cast to-wei "$SWAP_AMOUNT" ether)
-    local amount_out_min=0
-    local path="$PRIOR_TOKEN","$USDC_TOKEN"
-    local to="$addr"
-    local deadline=$(($(date +%s) + 1800))  # 当前时间+30分钟
+    local amount_hex=$(printf "%064x" "$amount_in")
+    local swap_data="0x8ec7baf1${amount_hex}"
 
-    # 动态生成 swapExactTokensForTokens calldata
-    local swap_data=$(cast calldata "swapExactTokensForTokens(uint256,uint256,address[],address,uint256)" "$amount_in" "$amount_out_min" "[$path]" "$to" "$deadline")
+    # Set gas price (double the base gas price for reliability)
+    local base_gas=$(cast gas-price --rpc-url "$BASE_SEPOLIA_RPC")
+    local gas=$((base_gas * 2))
 
-    local gas=$(cast gas-price --rpc-url "$BASE_SEPOLIA_RPC")
-
-    attempt=1
-    max_retries=2
+    # Attempt swap with retries
+    local attempt=1
+    local max_retries=2
     while [[ $attempt -le $max_retries ]]; do
         log "${CYAN}Swap 尝试 $attempt/$max_retries for $addr...${NC}"
         local tx_output=$(cast send --private-key "$pk" --rpc-url "$BASE_SEPOLIA_RPC" --gas-limit 300000 --gas-price "$gas" --legacy "$SWAP_ROUTER" "$swap_data" --json 2>/dev/null)
-        #            👆👆👆👆👆 这里加了 --legacy
-
         local tx_hash=$(echo "$tx_output" | jq -r '.transactionHash')
 
         if [[ -n "$tx_hash" && "$tx_hash" != "null" ]]; then
@@ -496,15 +493,18 @@ swap_prior_to_usdc() {
             if [[ "$status" == "0x1" ]]; then
                 log "${GREEN}Swap 成功 for $addr: $tx_hash${NC}"
 
+                # Check PRIOR balance after swap
                 local new_bal=$(cast call "$PRIOR_TOKEN" "balanceOf(address)(uint256)" "$addr" --rpc-url "$BASE_SEPOLIA_RPC" | awk '{print $1}')
                 local new_pri_bal=$(echo "scale=2; $new_bal / 10^18" | bc)
                 log "PRIOR 余额 after Swap: $new_pri_bal"
 
+                # Check USDC balance and format properly
                 local usdc_bal=$(cast call "$USDC_TOKEN" "balanceOf(address)(uint256)" "$addr" --rpc-url "$BASE_SEPOLIA_RPC" | awk '{print $1}')
                 local usdc_decimals=$(cast call "$USDC_TOKEN" "decimals()(uint8)" --rpc-url "$BASE_SEPOLIA_RPC")
-                local new_usdc_bal=$(echo "scale=2; $usdc_bal / 10^$usdc_decimals" | bc)
+                local new_usdc_bal=$(echo "scale=2; $usdc_bal / 10^$usdc_decimals" | bc -l | awk '{printf "%.2f", $0}')
                 log "USDC 余额: $new_usdc_bal"
 
+                # Get block number
                 local block_number_hex=$(cast receipt "$tx_hash" --rpc-url "$BASE_SEPOLIA_RPC" --json 2>/dev/null | jq -r '.blockNumber')
                 local block_number=$(printf "%d" "$block_number_hex" 2>/dev/null)
                 if [[ -z "$block_number" || ! "$block_number" =~ ^[0-9]+$ ]]; then
@@ -514,7 +514,8 @@ swap_prior_to_usdc() {
                 fi
                 log "Block Number: $block_number"
 
-                local payload="{\"userId\":\"$addr\",\"type\":\"swap\",\"txHash\":\"$tx_hash\",\"fromToken\":\"PRIOR\",\"toToken\":\"USDC\",\"fromAmount\":\"$SWAP_AMOUNT\",\"toAmount\":\"0.2\",\"status\":\"completed\",\"blockNumber\":$block_number}"
+                # Construct JSON payload with properly formatted toAmount
+                local payload="{\"userId\":\"$addr\",\"type\":\"swap\",\"txHash\":\"$tx_hash\",\"fromToken\":\"PRIOR\",\"toToken\":\"USDC\",\"fromAmount\":\"$SWAP_AMOUNT\",\"toAmount\":$new_usdc_bal,\"status\":\"completed\",\"blockNumber\":$block_number}"
                 echo "$payload" | jq . > /dev/null 2>&1
                 if [[ $? -ne 0 ]]; then
                     log "${RED}JSON Payload 无效: $payload${NC}"
@@ -523,6 +524,7 @@ swap_prior_to_usdc() {
                 fi
                 log "${CYAN}JSON Payload: $payload${NC}"
 
+                # Send API request
                 local curl_cmd="curl -s -X POST \"https://prior-protocol-testnet-priorprotocol.replit.app/api/transactions\" \
                     -H \"Content-Type: application/json\" \
                     -H \"User-Agent: Mozilla/5.0\" \
@@ -550,8 +552,10 @@ swap_prior_to_usdc() {
                 fi
                 return 0
             else
-                log "${RED}Swap 失败 for $addr: $tx_hash (状态: $status)${NC}"
-                swap_failures+=("$addr: Swap交易失败 (状态: $status, TX: $tx_hash)")
+                # Log revert reason for failed transaction
+                local revert_reason=$(cast call --rpc-url "$BASE_SEPOLIA_RPC" "$SWAP_ROUTER" "revertReason(bytes32)(string)" "$tx_hash" 2>/dev/null || echo "无法获取 revert reason")
+                log "${RED}Swap 失败 for $addr: $tx_hash (状态: $status, 原因: $revert_reason)${NC}"
+                swap_failures+=("$addr: Swap交易失败 (状态: $status, 原因: $revert_reason, TX: $tx_hash)")
             fi
         else
             log "${RED}Swap交易发送失败 for $addr: $tx_output${NC}"
@@ -569,9 +573,6 @@ swap_prior_to_usdc() {
         fi
     done
 }
-
-
-
 
 # 批量兑换循环
 batch_swap_loop() {
@@ -640,7 +641,6 @@ send_dingding_test_notification() {
 
 
 
-# 发送钉钉通知
 # 发送钉钉通知
 send_dingding_notification() {
     local webhook_url="$1"
