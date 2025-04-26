@@ -617,87 +617,79 @@ send_dingding_test_notification() {
 }
 
 
+
 # 发送钉钉通知
-run_foreground() {
-    WORK_DIR="$HOME/prior"
-    mkdir -p "$WORK_DIR"
-    LOG_FILE="$WORK_DIR/operation_$(date +%F).log"
+send_dingding_notification() {
+    local webhook_url="$1"
+    local secret="$2"
+    local total_wallets="${#wallets[@]}"
+    local faucet_success_count="${#faucet_success[@]}"
+    local faucet_failure_count="${#faucet_failures[@]}"
+    local swap_success_count="${#swap_success[@]}"
+    local swap_failure_count="${#swap_failures[@]}"
+    local report_success_count="${#report_success[@]}"
+    local report_failure_count="${#report_failures[@]}"
 
-    load_wallets
-    load_proxies
-    load_config
-
-    if [[ ${#wallets[@]} -eq 0 ]]; then
-        log "${RED}没有有效的私钥，请先导入（选项 2）。${NC}"
-        return
-    fi
-
-    # 如果 config.env 中 webhook 或 secret 没配置，提示一次
-    if [[ -z "$DINGDING_WEBHOOK" || "$DINGDING_WEBHOOK" == "\"\"" || -z "$DINGDING_SECRET" || "$DINGDING_SECRET" == "\"\"" ]]; then
-        read -p "是否启用钉钉监控？（y/n）： " enable_dingding
-        if [[ "$enable_dingding" =~ ^[Yy]$ ]]; then
-            read -p "请输入钉钉 Webhook URL： " webhook_url
-            read -p "请输入钉钉 Secret： " secret
-
-            # 写入 config.env
-            sed -i "/DINGDING_WEBHOOK=/c\DINGDING_WEBHOOK=\"$webhook_url\"" "$CONFIG_FILE"
-            sed -i "/DINGDING_SECRET=/c\DINGDING_SECRET=\"$secret\"" "$CONFIG_FILE"
-            DINGDING_WEBHOOK="$webhook_url"
-            DINGDING_SECRET="$secret"
-            log "${GREEN}钉钉配置已保存到 $CONFIG_FILE${NC}"
-        else
-            DINGDING_WEBHOOK=""
-            DINGDING_SECRET=""
-            sed -i "/DINGDING_WEBHOOK=/c\DINGDING_WEBHOOK=\"\"" "$CONFIG_FILE"
-            sed -i "/DINGDING_SECRET=/c\DINGDING_SECRET=\"\"" "$CONFIG_FILE"
-            log "${CYAN}钉钉监控未启用${NC}"
-        fi
-    else
-        log "${CYAN}已从 $CONFIG_FILE 加载钉钉配置${NC}"
-    fi
-
-    # 钉钉测试通知（如果启用）
-    if [[ -n "$DINGDING_WEBHOOK" && -n "$DINGDING_SECRET" ]]; then
-        log "${CYAN}发送钉钉测试通知...${NC}"
-        if ! send_dingding_test_notification "$DINGDING_WEBHOOK" "$DINGDING_SECRET"; then
-            log "${RED}钉钉测试通知发送失败，请检查 Webhook URL 和 Secret 配置后重试。${NC}"
-            return 1
-        fi
-    else
-        log "${CYAN}未配置钉钉监控，跳过测试通知${NC}"
-    fi
-
-    log "${GREEN}启动前景任务，每 $COUNTDOWN_TIMER 秒执行一次领水、兑换和上报...${NC}"
-
-    while true; do
-        log "${CYAN}开始新一轮任务${NC}"
-
-        faucet_success=()
-        faucet_failures=()
-        swap_success=()
-        swap_failures=()
-        report_success=()
-        report_failures=()
-
-        # 1. 领水
-        log "${CYAN}开始批量领水...${NC}"
-        batch_faucet
-
-        # 2. 兑换
-        log "${CYAN}开始批量兑换...${NC}"
-        batch_swap_loop
-
-        # 3. 上报钉钉通知
-        if [[ -n "$DINGDING_WEBHOOK" && -n "$DINGDING_SECRET" ]]; then
-            send_dingding_notification "$DINGDING_WEBHOOK" "$DINGDING_SECRET"
-        else
-            log "${CYAN}未配置钉钉监控，跳过通知${NC}"
-        fi
-
-        log "${CYAN}任务完成，等待 $COUNTDOWN_TIMER 秒后继续...${NC}"
-        sleep "$COUNTDOWN_TIMER"
+    local faucet_failure_details=""
+    for failure in "${faucet_failures[@]}"; do
+        faucet_failure_details+="- 错误：领取失败地址 $failure"$'\n'
     done
+    [[ -z "$faucet_failure_details" ]] && faucet_failure_details="无"
+
+    local swap_failure_details=""
+    for failure in "${swap_failures[@]}"; do
+        swap_failure_details+="- 错误：兑换失败地址 $failure"$'\n'
+    done
+    [[ -z "$swap_failure_details" ]] && swap_failure_details="无"
+
+    local report_failure_details=""
+    for failure in "${report_failures[@]}"; do
+        report_failure_details+="- 错误：上报失败地址 $failure"$'\n'
+    done
+    [[ -z "$report_failure_details" ]] && report_failure_details="无"
+
+    local timestamp=$(date +%s%3N)
+    local string_to_sign="${timestamp}"$'\n'"${secret}"
+    local sign=$(echo -n "$string_to_sign" | openssl dgst -sha256 -hmac "$secret" -binary | base64)
+    local encoded_sign=$(printf %s "$sign" | jq -Rr @uri)
+
+    local markdown_content="### Prior Auto Bot 执行报告"$'\n'
+    markdown_content+="**执行时间**: $(date '+%Y-%m-%d %H:%M:%S')"$'\n\n'
+    markdown_content+="#### PRIOR 领水"$'\n'
+    markdown_content+="- **成功**: $faucet_success_count"$'\n'
+    markdown_content+="- **失败**: $faucet_failure_count"$'\n'
+    markdown_content+="- **失败详情**:"$'\n'"$faucet_failure_details"$'\n'
+    markdown_content+="#### 兑换 PRIOR 为 USDC"$'\n'
+    markdown_content+="- **成功**: $swap_success_count"$'\n'
+    markdown_content+="- **失败**: $swap_failure_count"$'\n'
+    markdown_content+="- **失败详情**:"$'\n'"$swap_failure_details"$'\n'
+    markdown_content+="#### API 上报"$'\n'
+    markdown_content+="- **成功**: $report_success_count"$'\n'
+    markdown_content+="- **失败**: $report_failure_count"$'\n'
+    markdown_content+="- **失败详情**:"$'\n'"$report_failure_details"
+
+    local payload=$(jq -n --arg msgtype "markdown" \
+        --arg title "Prior Auto Bot 执行报告" \
+        --arg text "$markdown_content" \
+        '{msgtype: $msgtype, markdown: {title: $title, text: $text}}')
+
+    echo -e "${CYAN}是否发送钉钉通知？(y/n)${NC}"
+    read -r confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        local response=$(curl -s "${webhook_url}&timestamp=${timestamp}&sign=${encoded_sign}" \
+            -H 'Content-Type: application/json' \
+            -d "$payload")
+        local errcode=$(echo "$response" | jq -r '.errcode')
+        if [[ "$errcode" == "0" ]]; then
+            echo -e "${GREEN}钉钉通知发送成功${NC}"
+        else
+            echo -e "${RED}钉钉通知发送失败: $response${NC}"
+        fi
+    else
+        echo -e "${RED}用户选择不发送钉钉通知${NC}"
+    fi
 }
+
 
 
 
