@@ -433,6 +433,7 @@ approve_prior() {
 }
 
 # 兑换 PRIOR 为 USDC
+# 兑换 PRIOR 为 USDC
 swap_prior_to_usdc() {
     local pk="$1"
     local proxy="$2"
@@ -466,8 +467,13 @@ swap_prior_to_usdc() {
         return 1
     fi
 
-    local amount_wei=$(echo "$SWAP_AMOUNT * 10^18" | bc | cut -d. -f1)
-    local swap_data="0x8ec7baf1000000000000000000000000000000000000000000000000016345785d8a0000"
+    # ====== 动态生成 swap_data 开始 ======
+    local function_selector="0x8ec7baf1"
+    local amount_wei=$(cast to-wei "$SWAP_AMOUNT" ether)
+    local amount_hex=$(printf "%064x" "$amount_wei")
+    local swap_data="${function_selector}${amount_hex}"
+    # ====== 动态生成 swap_data 结束 ======
+
     local gas=$(cast gas-price --rpc-url "$BASE_SEPOLIA_RPC")
 
     attempt=1
@@ -476,15 +482,17 @@ swap_prior_to_usdc() {
         log "${CYAN}Swap 尝试 $attempt/$max_retries for $addr...${NC}"
         local tx_output=$(cast send --private-key "$pk" --rpc-url "$BASE_SEPOLIA_RPC" --gas-limit 300000 --gas-price "$gas" "$SWAP_ROUTER" "$swap_data" --json 2>/dev/null)
         local tx_hash=$(echo "$tx_output" | jq -r '.transactionHash')
+
         if [[ -n "$tx_hash" && "$tx_hash" != "null" ]]; then
             sleep 10
             local status=$(cast receipt "$tx_hash" --rpc-url "$BASE_SEPOLIA_RPC" --json 2>/dev/null | jq -r '.status')
             if [[ "$status" == "0x1" ]]; then
                 log "${GREEN}Swap 成功 for $addr: $tx_hash${NC}"
-                
+
                 local new_bal=$(cast call "$PRIOR_TOKEN" "balanceOf(address)(uint256)" "$addr" --rpc-url "$BASE_SEPOLIA_RPC" | awk '{print $1}')
                 local new_pri_bal=$(echo "scale=2; $new_bal / 10^18" | bc)
                 log "PRIOR 余额 after Swap: $new_pri_bal"
+
                 local usdc_bal=$(cast call "$USDC_TOKEN" "balanceOf(address)(uint256)" "$addr" --rpc-url "$BASE_SEPOLIA_RPC" | awk '{print $1}')
                 local usdc_decimals=$(cast call "$USDC_TOKEN" "decimals()(uint8)" --rpc-url "$BASE_SEPOLIA_RPC")
                 local new_usdc_bal=$(echo "scale=2; $usdc_bal / 10^$usdc_decimals" | bc)
@@ -550,6 +558,7 @@ swap_prior_to_usdc() {
         fi
     done
 }
+
 
 # 批量兑换循环
 batch_swap_loop() {
