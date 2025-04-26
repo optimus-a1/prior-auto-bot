@@ -619,6 +619,7 @@ send_dingding_test_notification() {
 
 
 # 发送钉钉通知
+# 发送钉钉通知
 send_dingding_notification() {
     local webhook_url="$1"
     local secret="$2"
@@ -673,22 +674,18 @@ send_dingding_notification() {
         --arg text "$markdown_content" \
         '{msgtype: $msgtype, markdown: {title: $title, text: $text}}')
 
-    echo -e "${CYAN}是否发送钉钉通知？(y/n)${NC}"
-    read -r confirm
-    if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        local response=$(curl -s "${webhook_url}&timestamp=${timestamp}&sign=${encoded_sign}" \
-            -H 'Content-Type: application/json' \
-            -d "$payload")
-        local errcode=$(echo "$response" | jq -r '.errcode')
-        if [[ "$errcode" == "0" ]]; then
-            echo -e "${GREEN}钉钉通知发送成功${NC}"
-        else
-            echo -e "${RED}钉钉通知发送失败: $response${NC}"
-        fi
+    echo -e "${CYAN}正在自动发送钉钉通知...${NC}"
+    local response=$(curl -s "${webhook_url}&timestamp=${timestamp}&sign=${encoded_sign}" \
+        -H 'Content-Type: application/json' \
+        -d "$payload")
+    local errcode=$(echo "$response" | jq -r '.errcode')
+    if [[ "$errcode" == "0" ]]; then
+        echo -e "${GREEN}钉钉通知发送成功${NC}"
     else
-        echo -e "${RED}用户选择不发送钉钉通知${NC}"
+        echo -e "${RED}钉钉通知发送失败: $response${NC}"
     fi
 }
+
 
 
 
