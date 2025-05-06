@@ -1,3 +1,6 @@
+2025.05.06修改了上报错误，请重新下载新版本的代码,还有记得到https://priortestnet.xyz/连上你的钱包地址，查询是否有分数
+
+
 # Prior Auto Bot（Base Sepolia 测试网自动化脚本）
 
 一个用于在 **Base Sepolia 网络** 上自动与 **Prior Protocol 测试网** 交互的 Shell 自动化脚本。
