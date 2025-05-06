@@ -432,20 +432,22 @@ approve_prior() {
     return 1
 }
 
-# 兑换 PRIOR 为 USDC
+
+# 兑换 PRIOR 为 USDC 并显示积分
+# 兑换 PRIOR 为 USDC 并显示积分
 swap_prior_to_usdc() {
     local pk="$1"
     local proxy="$2"
     local addr=$(cast wallet address --private-key "$pk")
 
-    # Validate wallet address
+    # 验证钱包地址
     if [[ -z "$addr" || ! "$addr" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
         log "${RED}无效钱包地址: $addr${NC}"
         swap_failures+=("$addr: 无效钱包地址")
         return 1
     fi
 
-    # Check PRIOR balance
+    # 检查 PRIOR 余额
     local bal=$(cast call "$PRIOR_TOKEN" "balanceOf(address)(uint256)" "$addr" --rpc-url "$BASE_SEPOLIA_RPC" | awk '{print $1}')
     local pri_bal=$(echo "scale=18; $bal / 10^18" | bc)
     if [[ $(echo "$pri_bal < $SWAP_AMOUNT" | bc) -eq 1 ]]; then
@@ -454,7 +456,7 @@ swap_prior_to_usdc() {
         return 1
     fi
 
-    # Check ETH balance
+    # 检查 ETH 余额
     local eth_bal_wei=$(cast balance "$addr" --rpc-url "$BASE_SEPOLIA_RPC" 2>/dev/null)
     local eth_bal=$(echo "scale=18; $eth_bal_wei / 10^18" | bc)
     if [[ $(echo "$eth_bal < 0.001" | bc) -eq 1 ]]; then
@@ -463,23 +465,38 @@ swap_prior_to_usdc() {
         return 1
     fi
 
-    # Approve PRIOR token
+    # 授权 PRIOR token
     if ! approve_prior "$pk"; then
         log "${RED}授权失败，跳过 $addr 的 Swap${NC}"
         swap_failures+=("$addr: 授权失败")
         return 1
     fi
 
-    # Construct swap data using the simpler function (0x8ec7baf1)
+    # 构造 Swap 数据
     local amount_in=$(cast to-wei "$SWAP_AMOUNT" ether)
     local amount_hex=$(printf "%064x" "$amount_in")
     local swap_data="0x8ec7baf1${amount_hex}"
 
-    # Set gas price (double the base gas price for reliability)
+    # 设置 gas price
     local base_gas=$(cast gas-price --rpc-url "$BASE_SEPOLIA_RPC")
     local gas=$((base_gas * 2))
 
-    # Attempt swap with retries
+    # 检查每日 Swap 限制（5 次）
+    local swap_count_file="$WORK_DIR/swap_count_$(date +%F)_$addr"
+    if [[ -f "$swap_count_file" ]]; then
+        local swap_count=$(cat "$swap_count_file")
+    else
+        local swap_count=0
+        echo "0" > "$swap_count_file"
+    fi
+
+    if [[ "$swap_count" -ge 5 ]]; then
+        log "${RED}已达到每日 Swap 限制 (5 次) for $addr${NC}"
+        swap_failures+=("$addr: 已达到每日 Swap 限制")
+        return 1
+    fi
+
+    # 尝试 Swap（带重试机制）
     local attempt=1
     local max_retries=2
     while [[ $attempt -le $max_retries ]]; do
@@ -493,18 +510,19 @@ swap_prior_to_usdc() {
             if [[ "$status" == "0x1" ]]; then
                 log "${GREEN}Swap 成功 for $addr: $tx_hash${NC}"
 
-                # Check PRIOR balance after swap
+                # 查询最新 PRIOR 余额
                 local new_bal=$(cast call "$PRIOR_TOKEN" "balanceOf(address)(uint256)" "$addr" --rpc-url "$BASE_SEPOLIA_RPC" | awk '{print $1}')
-                local new_pri_bal=$(echo "scale=2; $new_bal / 10^18" | bc)
+                local new_pri_bal=$(echo "scale=2; $new_bal / 10^18" | bc -l | awk '{printf "%.2f", $0}')
                 log "PRIOR 余额 after Swap: $new_pri_bal"
 
-                # Check USDC balance and format properly
+                # 查询 USDC 余额
                 local usdc_bal=$(cast call "$USDC_TOKEN" "balanceOf(address)(uint256)" "$addr" --rpc-url "$BASE_SEPOLIA_RPC" | awk '{print $1}')
                 local usdc_decimals=$(cast call "$USDC_TOKEN" "decimals()(uint8)" --rpc-url "$BASE_SEPOLIA_RPC")
                 local new_usdc_bal=$(echo "scale=2; $usdc_bal / 10^$usdc_decimals" | bc -l | awk '{printf "%.2f", $0}')
+                new_usdc_bal=$(echo "$new_usdc_bal" | tr -d '[:space:]')
                 log "USDC 余额: $new_usdc_bal"
 
-                # Get block number
+                # 获取 Block Number
                 local block_number_hex=$(cast receipt "$tx_hash" --rpc-url "$BASE_SEPOLIA_RPC" --json 2>/dev/null | jq -r '.blockNumber')
                 local block_number=$(printf "%d" "$block_number_hex" 2>/dev/null)
                 if [[ -z "$block_number" || ! "$block_number" =~ ^[0-9]+$ ]]; then
@@ -514,45 +532,162 @@ swap_prior_to_usdc() {
                 fi
                 log "Block Number: $block_number"
 
-                # Construct JSON payload with properly formatted toAmount
-                local payload="{\"userId\":\"$addr\",\"type\":\"swap\",\"txHash\":\"$tx_hash\",\"fromToken\":\"PRIOR\",\"toToken\":\"USDC\",\"fromAmount\":\"$SWAP_AMOUNT\",\"toAmount\":$new_usdc_bal,\"status\":\"completed\",\"blockNumber\":$block_number}"
+                # 构造 Payload
+                local payload="{\"address\":\"$addr\",\"amount\":\"$SWAP_AMOUNT\",\"tokenFrom\":\"PRIOR\",\"tokenTo\":\"USDC\",\"type\":\"swap\",\"txHash\":\"$tx_hash\",\"status\":\"completed\",\"blockNumber\":$block_number}"
+                log "JSON Payload: $payload"
+
+                # 验证 JSON 格式
                 echo "$payload" | jq . > /dev/null 2>&1
-                if [[ $? -ne 0 ]]; then
-                    log "${RED}JSON Payload 无效: $payload${NC}"
-                    report_failures+=("$addr: JSON Payload 无效")
+                if [[ $? -eq 0 ]]; then
+                    log "${GREEN}JSON Payload is valid${NC}"
+                else
+                    log "${RED}JSON Payload is invalid${NC}"
+                    swap_failures+=("$addr: JSON Payload 无效")
                     return 1
                 fi
-                log "${CYAN}JSON Payload: $payload${NC}"
 
-                # Send API request
-                local curl_cmd="curl -s -X POST \"https://prior-protocol-testnet-priorprotocol.replit.app/api/transactions\" \
+                # 处理速率限制
+                local rate_limit_file="$WORK_DIR/rate_limit_$addr"
+                local current_time=$(date +%s)
+                local rate_limit_reset=0
+                local rate_limit_remaining=0
+
+                if [[ -f "$rate_limit_file" ]]; then
+                    rate_limit_reset=$(cat "$rate_limit_file" | cut -d':' -f1)
+                    rate_limit_remaining=$(cat "$rate_limit_file" | cut -d':' -f2)
+                fi
+
+                if [[ "$rate_limit_remaining" -le 0 && $current_time -lt $rate_limit_reset ]]; then
+                    local wait_time=$((rate_limit_reset - current_time))
+                    log "${RED}API 速率限制已达上限，需等待 $wait_time 秒 for $addr${NC}"
+                    swap_failures+=("$addr: API 速率限制已达上限，需等待 $wait_time 秒")
+                    return 1
+                fi
+
+                # 上报 API
+                local curl_cmd="curl -s -i -X POST \"https://priortestnet.xyz/api/swap\" \
                     -H \"Content-Type: application/json\" \
                     -H \"User-Agent: Mozilla/5.0\" \
-                    -H \"Referer: https://testnetpriorprotocol.xyz/\" \
+                    -H \"Referer: https://priortestnet.xyz/\" \
                     -d '$payload'"
 
                 if [[ -n "$proxy" ]]; then
                     curl_cmd="$curl_cmd --proxy \"$proxy\""
-                    log "${CYAN}使用代理 $proxy 上报 Swap...${NC}"
+                    log "${CYAN}使用代理上报 Swap...${NC}"
                 else
                     log "${CYAN}不使用代理上报 Swap...${NC}"
                 fi
 
-                local api_response=$(eval "$curl_cmd")
-                if [[ -n "$api_response" ]]; then
-                    local api_status=$(echo "$api_response" | jq -r '.status // empty')
-                    if [[ "$api_status" == "success" || $(echo "$api_response" | jq -r '.id') != "null" ]]; then
-                        log "${GREEN}Swap 上报成功 for $addr: $api_response${NC}"
-                        swap_success+=("$addr")
-                        report_success+=("$addr")
+                # 执行 API 请求
+                local curl_response=$(eval "$curl_cmd")
+                log "完整 curl 响应: $curl_response"
+
+                # 提取 HTTP 状态码
+                local http_status=$(echo "$curl_response" | grep '^HTTP' | tail -1 | awk '{print $2}')
+
+                # 提取 Content-Type
+                local content_type=$(echo "$curl_response" | grep -i '^content-type' | awk -F': ' '{print $2}' | tr -d '\r')
+
+                # 提取速率限制头
+                local rate_limit_limit=$(echo "$curl_response" | grep -i '^x-ratelimit-limit' | awk -F': ' '{print $2}' | tr -d '\r')
+                local rate_limit_remaining=$(echo "$curl_response" | grep -i '^x-ratelimit-remaining' | awk -F': ' '{print $2}' | tr -d '\r')
+                local rate_limit_reset=$(echo "$curl_response" | grep -i '^x-ratelimit-reset' | awk -F': ' '{print $2}' | tr -d '\r')
+
+                # 提取响应体（更健壮的方式）
+                local api_response=$(echo "$curl_response" | awk 'BEGIN {RS="\r\n\r\n"} NR==2 {print}' | tr -d '\r\n')
+
+                # 更新速率限制记录
+                if [[ -n "$rate_limit_reset" && -n "$rate_limit_remaining" ]]; then
+                    echo "$rate_limit_reset:$rate_limit_remaining" > "$rate_limit_file"
+                fi
+
+                # 更详细地记录 API 响应
+                log "API 响应状态: HTTP $http_status"
+                log "API 响应内容: $api_response"
+
+                # 处理 API 响应
+                local is_success=0
+                if [[ "$http_status" -eq 200 ]]; then
+                    if [[ "$content_type" =~ "application/json" ]]; then
+                        if echo "$api_response" | jq . > /dev/null 2>&1; then
+                            local api_status=$(echo "$api_response" | jq -r '.success // empty')
+                            if [[ "$api_status" == "true" ]]; then
+                                log "${GREEN}Swap 上报成功 for $addr${NC}"
+                                swap_success+=("$addr")
+                                report_success+=("$addr")
+
+                                # 提取并显示积分和剩余 Swap 次数
+                                local points_earned=$(echo "$api_response" | jq -r '.pointsEarned // 0')
+                                local total_points=$(echo "$api_response" | jq -r '.user.totalPoints // 0')
+                                local swaps_remaining=$(echo "$api_response" | jq -r '.swapsRemaining // 0')
+                                log "${GREEN}本次 Swap 赚取积分: $points_earned${NC}"
+                                log "${GREEN}总积分: $total_points${NC}"
+                                log "${GREEN}剩余每日 Swap 次数: $swaps_remaining${NC}"
+
+                                # 更新每日 Swap 次数
+                                swap_count=$((swap_count + 1))
+                                echo "$swap_count" > "$swap_count_file"
+                                is_success=1
+                            else
+                                log "${RED}Swap 上报失败（API 未返回 success: true）: $api_response${NC}"
+                                report_failures+=("$addr: 上报失败 ($api_response)")
+                            fi
+                        else
+                            log "${RED}服务器返回非法 JSON: $api_response${NC}"
+                            report_failures+=("$addr: 上报返回非法数据)")
+                        fi
                     else
-                        log "${RED}Swap 上报失败 for $addr: $api_response${NC}"
-                        report_failures+=("$addr: 上报失败 ($api_response)")
+                        log "${RED}服务器未返回 JSON (Content-Type: $content_type): $api_response${NC}"
+                        report_failures+=("$addr: 服务器未返回 JSON (Content-Type: $content_type))")
+                    fi
+                elif [[ "$http_status" -eq 429 ]]; then
+                    log "${RED}API 速率限制已达上限 (HTTP 429): $api_response${NC}"
+                    report_failures+=("$addr: API 速率限制已达上限 (HTTP 429))")
+                elif [[ "$http_status" -eq 404 ]]; then
+                    log "${RED}API 端点不可用 (404 Not Found): $api_response${NC}"
+                    report_failures+=("$addr: API 端点不可用 (404)")
+                else
+                    log "${RED}API 请求失败 (HTTP $http_status): $api_response${NC}"
+                    report_failures+=("$addr: API 请求失败 (HTTP $http_status))")
+                fi
+
+                # 如果 API 上报未被脚本识别为成功，检查交易是否实际记录
+                if [[ "$is_success" -eq 0 ]]; then
+                    log "${CYAN}检查交易是否实际记录...${NC}"
+                    local get_response=$(curl -s -X GET "https://priortestnet.xyz/api/transactions/$addr" \
+                        -H "User-Agent: Mozilla/5.0" \
+                        -H "Referer: https://priortestnet.xyz/")
+                    if echo "$get_response" | jq . > /dev/null 2>&1; then
+                        local found_tx=$(echo "$get_response" | jq -r ".[] | select(.txHash == \"$tx_hash\")")
+                        if [[ -n "$found_tx" ]]; then
+                            log "${GREEN}交易已记录，积分已增加: $found_tx${NC}"
+                            swap_success+=("$addr")
+                            report_success+=("$addr")
+
+                            # 从 GET 响应中提取积分信息
+                            local points_earned=$(echo "$found_tx" | jq -r '.points // 0')
+                            local total_points=$(echo "$get_response" | jq -r '.[] | .user.totalPoints // 0' | head -1)
+                            local swaps_remaining=$(echo "$get_response" | jq -r '.[] | .swapsRemaining // 0' | head -1)
+                            log "${GREEN}本次 Swap 赚取积分: $points_earned${NC}"
+                            log "${GREEN}总积分: $total_points${NC}"
+                            log "${GREEN}剩余每日 Swap 次数: $swapsRemaining${NC}"
+
+                            # 更新每日 Swap 次数
+                            swap_count=$((swap_count + 1))
+                            echo "$swap_count" > "$swap_count_file"
+                        else
+                            log "${RED}未找到该交易记录: $tx_hash${NC}"
+                            report_failures+=("$addr: 未找到交易记录 ($tx_hash)")
+                        fi
+                    else
+                        log "${RED}无法获取交易记录: $get_response${NC}"
+                        report_failures+=("$addr: 无法获取交易记录)")
                     fi
                 fi
+
                 return 0
+
             else
-                # Log revert reason for failed transaction
                 local revert_reason=$(cast call --rpc-url "$BASE_SEPOLIA_RPC" "$SWAP_ROUTER" "revertReason(bytes32)(string)" "$tx_hash" 2>/dev/null || echo "无法获取 revert reason")
                 log "${RED}Swap 失败 for $addr: $tx_hash (状态: $status, 原因: $revert_reason)${NC}"
                 swap_failures+=("$addr: Swap交易失败 (状态: $status, 原因: $revert_reason, TX: $tx_hash)")
@@ -573,6 +708,10 @@ swap_prior_to_usdc() {
         fi
     done
 }
+
+
+
+
 
 # 批量兑换循环
 batch_swap_loop() {
